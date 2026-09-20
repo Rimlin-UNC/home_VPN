@@ -1,0 +1,182 @@
+# ============================================================
+# StealthNode — оркестрация всех сервисов (один VPS).
+# Все компоненты изолированы в Docker-контейнерах.
+# Запуск: docker compose up -d --build
+# ============================================================
+name: stealthnode
+
+services:
+  # --------------------- AmneziaWG (основной туннель) ---------------------
+  amneziawg:
+    build:
+      context: ./amneziawg
+      args:
+        # Закреплённые версии AmneziaWG 3.1 (проверено в сентябре 2026)
+        AWG_GO_REF: v3.1.20260812
+        AWG_TOOLS_REF: v3.1.20260812
+    image: stealthnode/amneziawg:3.1
+    container_name: stealthnode-amneziawg
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN   # управление интерфейсом awg0, tc, nftables внутри контейнера
+      - NET_RAW
+    devices:
+      - /dev/net/tun  # userspace-реализация (amneziawg-go) работает через TUN
+    sysctls:
+      # Форвардинг внутри namespace контейнера (клиенты -> интернет)
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.src_valid_mark: "1"
+    ports:
+      # Снаружи — случайный UDP-порт из .env; внутри контейнера всегда 51820
+      - "${AWG_PORT}:51820/udp"
+    volumes:
+      - ./amneziawg/conf:/etc/amneziawg:rw
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.2
+    env_file: .env
+    environment:
+      # Адрес внутреннего DNS-резолвера (перехват :53 клиентов идёт сюда)
+      DNSCRYPT_IP: 172.20.0.10
+    healthcheck:
+      test: ["CMD", "awg", "show", "awg0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # --------------------- Xray VLESS + REALITY (резерв) ---------------------
+  xray:
+    build:
+      context: ./xray
+      args:
+        # v26.7.28 — последняя версия БЕЗ обязательного постквантового
+        # ключа X25519MLKEM768 (с v26.9.8 сервер требует ML-KEM, что ломает
+        # совместимость с большинством клиентов: v2rayNG, Streisand и т.д.)
+        XRAY_VERSION: 26.7.28
+    image: stealthnode/xray:26.7.28
+    container_name: stealthnode-xray
+    restart: unless-stopped
+    ports:
+      - "443:443/tcp"
+    volumes:
+      - ./xray/conf:/etc/xray:rw
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.20
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x xray >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------- dnscrypt-proxy (защита DNS) ---------------------
+  dnscrypt:
+    build:
+      context: ./dnscrypt
+      args:
+        DNSCRYPT_VERSION: 2.1.18
+    image: stealthnode/dnscrypt:2.1.18
+    container_name: stealthnode-dnscrypt
+    restart: unless-stopped
+    volumes:
+      - ./dnscrypt/conf:/etc/dnscrypt-proxy:ro
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x dnscrypt-proxy >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------- Бэкенд веб-панели (FastAPI) ---------------------
+  backend:
+    build: ./backend
+    image: stealthnode/backend:latest
+    container_name: stealthnode-backend
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock      # управление контейнерами (бот, перезапуски)
+      - ./data:/app/data                                # SQLite + снапшоты трафика
+      - ./amneziawg/conf:/etc/amneziawg:rw              # конфиги AWG и клиентские .conf
+      - ./xray/conf:/etc/xray:rw                        # конфиг Xray (управление клиентами)
+      - ./trading-bot/bot.env:/app/bot/bot.env:rw       # настройки бота (редактор в панели)
+      - ./trading-bot/logs:/app/bot/logs                # логи и status.json бота
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.30
+    depends_on:
+      amneziawg:
+        condition: service_healthy
+      dnscrypt:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=5).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 25s
+
+  # --------------------- Caddy (HTTPS + сокрытие панели) ---------------------
+  caddy:
+    # Закреплённая мажорно-минорная версия; alpine-образ минимален
+    image: caddy:2.8-alpine
+    container_name: stealthnode-caddy
+    restart: unless-stopped
+    ports:
+      - "${PANEL_PORT}:443/tcp"   # веб-панель (случайный порт)
+      - "80:80/tcp"               # нужен только для Let's Encrypt HTTP-01
+    environment:
+      PANEL_SITE: ${PANEL_SITE:-:443}
+      PANEL_TLS: ${PANEL_TLS:-internal}
+      PANEL_PATH: ${PANEL_PATH}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data           # сертификаты Let's Encrypt / internal CA
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.40
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 5 -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------- Торговый бот OKX (изолирован) ---------------------
+  trading-bot:
+    build: ./trading-bot
+    image: stealthnode/trading-bot:latest
+    container_name: stealthnode-trading-bot
+    restart: unless-stopped
+    # Жёсткие лимиты, чтобы бот НИКОГДА не мешал VPN (см. ТЗ п.4.4)
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    env_file:
+      - ./trading-bot/bot.env
+    volumes:
+      - ./trading-bot/logs:/app/logs
+    networks:
+      # Отдельная сеть: у бота НЕТ доступа к VPN-сервисам (stealthnet)
+      - botnet
+
+networks:
+  # Внутренняя сеть VPN-стека (фиксированные адреса нужны для DNS-перехвата)
+  stealthnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+  # Изолированная сеть торгового бота (только выход в интернет через NAT)
+  botnet:
+    driver: bridge
+
+volumes:
+  caddy_data:
