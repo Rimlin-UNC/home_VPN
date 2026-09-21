@@ -12,7 +12,15 @@ Caddy) + наш установщик, панель и логика квот.
 curl -fsSL https://raw.githubusercontent.com/Rimlin-UNC/home_VPN/main/stealthnode/install.sh | sudo bash
 ```
 
-или для дебага: `git clone … && cd stealthnode && sudo ./install.sh`.
+Если GitHub raw с вашего сервера не открывается (бывает у РФ-площадок) —
+зеркало через jsDelivr CDN:
+
+```bash
+curl -fsSL https://cdn.jsdelivr.net/gh/Rimlin-UNC/home_VPN@main/stealthnode/install.sh | sudo bash
+```
+
+или для дебага: `git clone … && cd stealthnode && sudo ./install.sh`
+(установщик при недоступности github.com сам переключится на codeload-архив).
 
 ## Управление
 
