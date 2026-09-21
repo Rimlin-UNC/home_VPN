@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<!-- ============================================================
+     StealthNode — веб-панель администратора (SPA).
+     Все пути относительные: панель работает под секретным префиксом
+     (/p-XXXXXXXX/), который срезает Caddy.
+     ============================================================ -->
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>StealthNode — панель</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Экран входа -->
+  <div id="login-screen" class="login-screen hidden">
+    <form id="login-form" class="login-card">
+      <h1>🛡️ StealthNode</h1>
+      <p class="muted">Панель администратора</p>
+      <input id="login-username" type="text" placeholder="Логин" autocomplete="username" required>
+      <input id="login-password" type="password" placeholder="Пароль" autocomplete="current-password" required>
+      <button type="submit" class="btn btn-primary">Войти</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <!-- Основной интерфейс -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <button id="menu-toggle" class="btn btn-icon" aria-label="Меню">☰</button>
+      <h1>StealthNode</h1>
+      <span id="conn-indicator" class="dot dot-gray" title="WebSocket"></span>
+      <button id="logout-btn" class="btn btn-small">Выйти</button>
+    </header>
+
+    <div class="layout">
+      <nav id="sidebar" class="sidebar">
+        <a href="#/dashboard" data-page="dashboard" class="nav-link">📊 Дашборд</a>
+        <a href="#/devices" data-page="devices" class="nav-link">📱 Устройства</a>
+        <a href="#/guests" data-page="guests" class="nav-link">👥 Гости</a>
+        <a href="#/bot" data-page="bot" class="nav-link">🤖 Торговый бот</a>
+        <a href="#/settings" data-page="settings" class="nav-link">⚙️ Настройки</a>
+        <a href="#/audit" data-page="audit" class="nav-link">📜 Аудит</a>
+      </nav>
+
+      <main id="content" class="content"></main>
+    </div>
+  </div>
+
+  <!-- Модальное окно (универсальное) -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <button id="modal-close" class="btn btn-icon modal-close">✕</button>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+# ============================================================
+# StealthNode — Caddyfile (шаблон; install.sh подставляет env).
+# Задачи Caddy:
+#   1. HTTPS (Let's Encrypt при заданном домене, иначе tls internal);
+#   2. Сокрытие панели: всё, кроме секретного пути, получает 404;
+#   3. Проксирование на FastAPI-бэкенд (HTTP + WebSocket).
+# ============================================================
+
+{
+	# Админ-API Caddy оставляем только внутри контейнера (healthcheck)
+	admin localhost:2019
+	# Редиректы 80->443 не нужны (порт 80 занят только под ACME-челлендж)
+	auto_https disable_redirects
+}
+
+{$PANEL_SITE} {
+	tls {$PANEL_TLS}
+
+	# Не светим панель в логах Caddy
+	log {
+		output discard
+	}
+
+	# Секретный путь панели: /p-XXXXXXXX/* -> бэкенд (префикс срезается,
+	# внутри бэкенда пути /api/..., /ws -> см. backend/app/main.py)
+	handle_path /{$PANEL_PATH}/* {
+		reverse_proxy stealthnode-backend:8000
+	}
+
+	# Всё остальное — 404: сервер выглядит «пустым» даже на порту панели
+	handle {
+		respond "Not Found" 404
+	}
+}

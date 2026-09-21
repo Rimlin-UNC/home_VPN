@@ -1,0 +1,31 @@
+# ============================================================
+# StealthNode — файлы, которые НЕ должны попадать в git
+# (ключи, секреты, базы данных, логи, сгенерированные конфиги)
+# ============================================================
+
+# Секреты и окружение
+.env
+trading-bot/bot.env
+
+# Сгенерированные конфиги (содержат приватные ключи/пароли!)
+xray/conf/config.json
+xray/conf/share/
+hysteria/conf/hysteria.yaml
+hysteria/conf/server.crt
+hysteria/conf/server.key
+caddy/Caddyfile
+
+# Данные панели (SQLite, снапшоты трафика)
+data/
+
+# Логи торгового бота
+trading-bot/logs/
+
+# Резервные копии
+backups/
+*.backup.zip
+
+# Служебное
+__pycache__/
+*.pyc
+.DS_Store

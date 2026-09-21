@@ -1,0 +1,172 @@
+# ============================================================
+# StealthNode — оркестрация всех сервисов (один VPS).
+# Ядро обхода ТСПУ-2026:
+#   * Xray VLESS+REALITY (TCP/Vision :443 + gRPC + XHTTP) — основа;
+#   * Hysteria2 + Salamander (QUIC/UDP) — резерв (сети с потерями,
+#     провайдеры, где TCP-профиль уже детектируется).
+# Запуск: docker compose up -d --build
+# ============================================================
+name: stealthnode
+
+services:
+  # --------------------- Xray (основной VPN) ---------------------
+  xray:
+    build:
+      context: ./xray
+      args:
+        # v26.7.28 — последняя версия БЕЗ обязательного постквантового
+        # ключа X25519MLKEM768 (с v26.9.8 сервер требует ML-KEM, что ломает
+        # совместимость с большинством клиентов: v2rayNG, Streisand и т.д.)
+        XRAY_VERSION: 26.7.28
+    image: stealthnode/xray:26.7.28
+    container_name: stealthnode-xray
+    restart: unless-stopped
+    ports:
+      - "443:443/tcp"                 # профиль TCP/Vision (основной)
+      - "${XRAY_GRPC_PORT}:44301/tcp" # профиль gRPC  (резерв №1)
+      - "${XRAY_XHTTP_PORT}:44302/tcp"# профиль XHTTP (резерв №2)
+    volumes:
+      - ./xray/conf:/etc/xray:rw
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.20
+    # Все DNS-запросы пользователей VPN уходят через наш шифрованный резолвер
+    dns:
+      - 172.20.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x xray >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------- Hysteria2 (резервный VPN) ---------------------
+  hysteria:
+    build:
+      context: ./hysteria
+      args:
+        HYSTERIA_VERSION: 2.12.3
+    image: stealthnode/hysteria:2.12.3
+    container_name: stealthnode-hysteria
+    restart: unless-stopped
+    ports:
+      - "${HY2_PORT}:9999/udp"  # снаружи — случайный UDP-порт
+    volumes:
+      - ./hysteria/conf:/etc/hysteria:ro
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.25
+    # Включая DNS резолвера: никаких утечек plaintext-DNS
+    dns:
+      - 172.20.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x hysteria >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------- dnscrypt-proxy (защита DNS) ---------------------
+  dnscrypt:
+    build:
+      context: ./dnscrypt
+      args:
+        DNSCRYPT_VERSION: 2.1.18
+    image: stealthnode/dnscrypt:2.1.18
+    container_name: stealthnode-dnscrypt
+    restart: unless-stopped
+    volumes:
+      - ./dnscrypt/conf:/etc/dnscrypt-proxy:ro
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x dnscrypt-proxy >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------- Бэкенд веб-панели (FastAPI) ---------------------
+  backend:
+    build: ./backend
+    image: stealthnode/backend:latest
+    container_name: stealthnode-backend
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock      # управление контейнерами (бот, перезапуски, статистика)
+      - ./data:/app/data                                # SQLite + снапшоты трафика
+      - ./xray/conf:/etc/xray:rw                        # конфиг Xray (управление клиентами)
+      - ./trading-bot/bot.env:/app/bot/bot.env:rw       # настройки бота (редактор в панели)
+      - ./trading-bot/logs:/app/bot/logs                # логи и status.json бота
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.30
+    depends_on:
+      xray:
+        condition: service_healthy
+      dnscrypt:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=5).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 25s
+
+  # --------------------- Caddy (HTTPS + сокрытие панели) ---------------------
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: stealthnode-caddy
+    restart: unless-stopped
+    ports:
+      - "${PANEL_PORT}:443/tcp"   # веб-панель (случайный порт)
+      - "80:80/tcp"               # нужен только для Let's Encrypt HTTP-01
+    environment:
+      PANEL_SITE: ${PANEL_SITE:-:443}
+      PANEL_TLS: ${PANEL_TLS:-internal}
+      PANEL_PATH: ${PANEL_PATH}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data           # сертификаты Let's Encrypt / internal CA
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.40
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 5 -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------- Торговый бот OKX (изолирован) ---------------------
+  trading-bot:
+    build: ./trading-bot
+    image: stealthnode/trading-bot:latest
+    container_name: stealthnode-trading-bot
+    restart: unless-stopped
+    # Жёсткие лимиты, чтобы бот НИКОГДА не мешал VPN
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    env_file:
+      - ./trading-bot/bot.env
+    volumes:
+      - ./trading-bot/logs:/app/logs
+    networks:
+      # Отдельная сеть: у бота НЕТ доступа к VPN-сервисам (stealthnet)
+      - botnet
+
+networks:
+  stealthnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+  botnet:
+    driver: bridge
+
+volumes:
+  caddy_data:
