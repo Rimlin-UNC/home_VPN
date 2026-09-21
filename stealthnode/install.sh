@@ -94,9 +94,19 @@ if [[ ! -f "$SCRIPT_DIR/docker-compose.yml" ]]; then
     title "Bootstrap: загрузка проекта StealthNode"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq git
+    apt-get install -y -qq git curl ca-certificates
     if [[ ! -d "$INSTALL_DIR/.git" ]]; then
-        git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+        # Основной путь — git clone. Запасной — tar-архив codeload:
+        # у части провайдеров (в т.ч. в РФ) github.com/порты SDK глушатся,
+        # а codeload (тот же CDN GitHub) остаётся доступен.
+        if ! git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
+            warn "git clone не удался — GitHub недоступен? Пробую codeload-архив…"
+            local_repo="${REPO_URL#https://github.com/}"; local_repo="${local_repo%.git}"
+            rm -rf "$INSTALL_DIR"; mkdir -p "$INSTALL_DIR"
+            curl -fsSL --retry 3 "https://codeload.github.com/${local_repo}/tar.gz/refs/heads/main" \
+                | tar -xz --strip-components=1 -C "$INSTALL_DIR" \
+                || die "Не удалось скачать проект ни git, ни codeload. Проверьте доступ к GitHub."
+        fi
     fi
     SRC="$INSTALL_DIR"
     [[ -f "$SRC/stealthnode/docker-compose.yml" ]] && SRC="$INSTALL_DIR/stealthnode"
