@@ -24,22 +24,27 @@ class Settings(BaseSettings):
     server_public_ip: str = ""
     panel_path: str = "p-change-me"
     reality_sni: str = "www.tbank.ru"
-    awg_port: int = 51820
-    awg_subnet: str = "10.8.0.0/24"
-    awg_server_ip: str = "10.8.0.1"
-    awg_mtu: int = 1280
+    # Порты VPN-профилей (случайные, назначаются install.sh)
+    xray_grpc_port: int = 44301
+    xray_xhttp_port: int = 44302
+    hy2_port: int = 44444
+    # Параметры профилей и HY2 (генерируются install.sh)
+    xhttp_path: str = ""
+    grpc_service: str = ""
+    hy2_password: str = ""
+    salamander_password: str = ""
+    reality_short_id: str = ""
 
     # --- Пути и контейнеры ---
-    awg_container: str = "stealthnode-amneziawg"
     xray_container: str = "stealthnode-xray"
+    hysteria_container: str = "stealthnode-hysteria"
     bot_container: str = "stealthnode-trading-bot"
     managed_containers: str = (
-        "stealthnode-amneziawg,stealthnode-xray,stealthnode-dnscrypt,"
+        "stealthnode-xray,stealthnode-hysteria,stealthnode-dnscrypt,"
         "stealthnode-backend,stealthnode-caddy,stealthnode-trading-bot"
     )
-    awg_conf_path: Path = Path("/etc/amneziawg/awg0.conf")
-    clients_dir: Path = Path("/etc/amneziawg/clients")
     xray_conf_path: Path = Path("/etc/xray/config.json")
+    xray_api_addr: str = "127.0.0.1:10085"   # StatsService ВНУТРИ контейнера xray
     data_dir: Path = Path("/app/data")
     bot_env_path: Path = Path("/app/bot/bot.env")
     bot_logs_dir: Path = Path("/app/bot/logs")

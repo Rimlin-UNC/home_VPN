@@ -54,12 +54,25 @@ def _ensure_admin() -> None:
 
 
 def _sync_devices() -> None:
-    """Импорт пиров, созданных install.sh (admin.conf), в БД."""
-    from .services import wg_manager
+    """Импорт клиентов из конфига Xray в БД при первом запуске
+    (install.sh создал там клиента 'admin')."""
+    from .models import Device
+    from .services import xray_manager
 
     db = SessionLocal()
     try:
-        wg_manager.sync_from_clients_dir(db)
+        for client_uuid, email in xray_manager.list_clients():
+            if not email:
+                email = client_uuid[:8]
+            exists = db.query(Device).filter(Device.public_key == client_uuid).first()
+            if exists:
+                continue
+            db.add(Device(
+                name=email, kind="xray", public_key=client_uuid,
+                enabled=True, is_admin_device=(email == "admin"),
+            ))
+            log.info("Импортирован клиент из конфига Xray: %s", email)
+        db.commit()
     except Exception as exc:
         log.warning("Импорт устройств: %s", exc)
     finally:

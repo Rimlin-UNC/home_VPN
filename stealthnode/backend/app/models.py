@@ -49,21 +49,17 @@ class LoginBan(Base):
 
 
 class Device(Base):
-    """VPN-устройство (пир AmneziaWG или клиент Xray)."""
+    """VPN-устройство = пользователь Xray (UUID + email во всех транспортах)."""
 
     __tablename__ = "devices"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True)
-    kind: Mapped[str] = mapped_column(String(8), default="awg")  # 'awg' | 'xray'
-    tunnel_ip: Mapped[Optional[str]] = mapped_column(String(15), unique=True, nullable=True)
-    public_key: Mapped[str] = mapped_column(String(64), index=True)  # pub AWG или UUID VLESS
-    private_key: Mapped[str] = mapped_column(Text, default="")       # для экспорта конфига
-    psk: Mapped[str] = mapped_column(String(64), default="")         # Pre-Shared Key (AWG)
+    kind: Mapped[str] = mapped_column(String(8), default="xray")  # зарезервировано
+    public_key: Mapped[str] = mapped_column(String(64), index=True)  # UUID VLESS
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin_device: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    last_handshake: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     # delete-orphan: удаление устройства удаляет и гостевую запись
     guest: Mapped[Optional["Guest"]] = relationship(
@@ -72,7 +68,12 @@ class Device(Base):
 
 
 class Guest(Base):
-    """Гостевой аккаунт (до 5 по ТЗ) с лимитами трафика и скорости."""
+    """Гостевой аккаунт (до 5 по ТЗ) с лимитами трафика, окном и сроком.
+
+    Пер-юзерное ограничение СКОРОСТИ в прокси-стеке недоступно (трафик
+    клиентов неразличим внутри TLS до выхода из Xray) — вместо него:
+    лимиты трафика, временное окно, срок действия, приоритет-метка.
+    """
 
     __tablename__ = "guests"
 
@@ -83,9 +84,6 @@ class Guest(Base):
     quota_weekly_mb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     quota_monthly_mb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     quota_total_mb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # Ограничение скорости (Мбит/с); NULL — без ограничений
-    speed_down_mbps: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    speed_up_mbps: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # Временное окно доступа (время суток, локальное), формат "HH:MM"
     window_start: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
     window_end: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)

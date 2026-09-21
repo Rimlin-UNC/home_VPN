@@ -1,34 +1,39 @@
-# StealthNode
+# 🛡️ StealthNode — установщик персонального VPN-сервера
 
-Персональный VPN-сервер с веб-панелью для одного VPS (Ubuntu 24.04),
-реализованный по ТЗ из [корневого README](../README.md).
+Одна команда на чистом **Ubuntu 24.04 LTS** — и у вас устойчивый к ТСПУ
+личный VPN с веб-панелью: VLESS+REALITY (TCP/Vision :443 + gRPC + XHTTP),
+резервный Hysteria2, закрытая панель по секретному пути, гости с лимитами и
+изолированный торговый бот OKX. Готовые проекты (Xray, Hysteria, dnscrypt,
+Caddy) + наш установщик, панель и логика квот.
 
-**Установка одной командой:**
+## Установка
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Rimlin-UNC/home_VPN/main/stealthnode/install.sh | sudo bash
 ```
 
-## Структура проекта
+или для дебага: `git clone … && cd stealthnode && sudo ./install.sh`.
+
+## Управление
+
+- `sudo ./setup.sh` — смена пароля/домена маскировки, показ ссылок и QR;
+- панель: `<SECRET_PATH>` из `/root/stealthnode-credentials.txt`;
+- [docs/README.md](docs/README.md) — стек и клиенты;
+- [docs/SECURITY.md](docs/SECURITY.md) — меры и компромиссы;
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — диагностика, включая детект ТСПУ.
+
+## Структура
 
 ```
 stealthnode/
-├── install.sh              # ← главный установщик (запускать на сервере)
-├── setup.sh                # переконфигурация после установки
-├── docker-compose.yml      # оркестрация стека
-├── .env.example            # описание всех переменных окружения
-├── amneziawg/              # AmneziaWG 3.1: Dockerfile (сборка из исходников),
-│   ├── entrypoint.sh       #   поднятие туннеля, NAT, DNS-перехват, tc/ifb
-│   └── conf/awg0.conf.tmpl
-├── xray/                   # Xray 26.7.28 VLESS+REALITY: Dockerfile + шаблон конфига
-├── dnscrypt/               # dnscrypt-proxy 2.1.18: Dockerfile + toml
-├── backend/                # FastAPI-панель: API, WebSocket, сервисы, SPA-фронтенд
-├── trading-bot/            # торговый бот OKX (ccxt, симуляция по умолчанию)
-├── caddy/Caddyfile.tmpl    # HTTPS + сокрытие панели за секретным путём
-└── docs/
-    ├── README.md           # ← полная документация (хостинги, установка, пользование)
-    ├── SECURITY.md         # модель безопасности
-    └── TROUBLESHOOTING.md  # решение типовых проблем
+├── install.sh              # точка входа «одной ссылкой»
+├── setup.sh                # управление после установки
+├── docker-compose.yml      # 6 контейнеров: xray, hysteria, dnscrypt, backend, caddy, bot
+├── .env.example
+├── xray/                   # официальный образ, шаблон конфига (3 транспорта + stats API)
+├── hysteria/               # официальный бинарник, шаблон конфига (QUIC+Salamander)
+├── dnscrypt/               # официальные релизы dnscrypt-proxy
+├── caddy/                  # HTTPS-терминация и сокрытие панели
+├── backend/                # наша панель (FastAPI) — см. backend/README.md
+└── trading-bot/            # изолированный бот OKX — см. trading-bot/README.md
 ```
-
-Документация: [docs/README.md](docs/README.md)

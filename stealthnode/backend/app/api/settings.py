@@ -3,7 +3,6 @@
 # смена пароля администратора.
 # ============================================================
 import io
-import json
 import re
 import zipfile
 from datetime import datetime
@@ -17,57 +16,26 @@ from ..database import get_db
 from ..deps import client_ip, get_current_admin
 from ..models import AdminUser, AuditLog, RefreshToken
 from ..security import hash_password, verify_password
-from ..services import docker_client, wg_manager, xray_manager
+from ..services import docker_client, xray_manager
 from ..services.audit import audit
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
-# Допустимые параметры обфускации и их валидация
-_OBF_INT_KEYS = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4")
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-zA-Z0-9](-?[a-zA-Z0-9])*\.)+[a-zA-Z]{2,63}$")
 
 
-class ObfuscationIn(BaseModel):
-    params: dict[str, str]
+@router.get("/settings/links")
+def owner_links(admin: AdminUser = Depends(get_current_admin),
+                db: Session = Depends(get_db)):
+    """Все ссылки владельца: три транспорта Xray + резервный Hysteria2."""
+    from ..models import Device
 
-
-@router.get("/settings/awg")
-def get_awg_settings(admin: AdminUser = Depends(get_current_admin)):
-    """Текущие параметры обфускации AmneziaWG."""
-    return {
-        "params": wg_manager.get_obfuscation_params(),
-        "awg_port": cfg.awg_port,
-        "awg_mtu": cfg.awg_mtu,
-        "subnet": cfg.awg_subnet,
-        "warning": "После изменения параметров обновите конфиги на ВСЕХ клиентских устройствах!",
-    }
-
-
-@router.put("/settings/awg")
-def put_awg_settings(data: ObfuscationIn, request: Request,
-                     admin: AdminUser = Depends(get_current_admin),
-                     db: Session = Depends(get_db)):
-    new_params: dict[str, str] = {}
-    for key, value in data.params.items():
-        if key not in _OBF_INT_KEYS:
-            raise HTTPException(400, f"Неизвестный параметр: {key}")
-        if not value.isdigit():
-            raise HTTPException(400, f"{key}: значение должно быть неотрицательным целым")
-        new_params[key] = value
-    if not new_params:
-        raise HTTPException(400, "Нет параметров для обновления")
-    # Минимальные инварианты AmneziaWG
-    merged = {**wg_manager.get_obfuscation_params(), **new_params}
-    if merged.get("Jmin") and merged.get("Jmax") and int(merged["Jmin"]) > int(merged["Jmax"]):
-        raise HTTPException(400, "Jmin не может быть больше Jmax")
-
-    wg_manager.update_interface_obfuscation(new_params)
-    ok, msg = docker_client.action(cfg.awg_container, "restart")
-    audit(db, "settings.awg", json.dumps(new_params), client_ip(request))
-    db.commit()
-    if not ok:
-        raise HTTPException(502, f"Конфиг обновлён, но перезапуск не удался: {msg}")
-    return {"ok": True, "message": "Параметры применены. Не забудьте обновить клиентские конфиги!"}
+    owner = db.query(Device).filter(Device.is_admin_device.is_(True)).first()
+    links: dict[str, str] = {}
+    if owner:
+        links = xray_manager.share_links(owner.name, owner.public_key)
+    links["hy2"] = xray_manager.hy2_link()
+    return links
 
 
 @router.get("/settings/reality")
@@ -105,14 +73,13 @@ def put_reality_settings(data: RealityIn, request: Request,
 # ---------------- Бэкап / восстановление ----------------
 
 _BACKUP_FILES = [
-    "/etc/amneziawg/awg0.conf",
     "/etc/xray/config.json",
 ]
 
 
 @router.get("/settings/backup")
 def backup(admin: AdminUser = Depends(get_current_admin)):
-    """ZIP-архив: конфиги AWG/Xray, клиентские .conf, база панели, bot.env."""
+    """ZIP-архив: конфиг Xray, база панели, bot.env."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in _BACKUP_FILES:
@@ -121,10 +88,6 @@ def backup(admin: AdminUser = Depends(get_current_admin)):
                     zf.writestr(path.lstrip("/"), fh.read())
             except FileNotFoundError:
                 pass
-        # Клиентские конфиги
-        if cfg.clients_dir.is_dir():
-            for f in sorted(cfg.clients_dir.glob("*.conf")):
-                zf.writestr(f"clients/{f.name}", f.read_bytes())
         # База данных панели
         db_path = cfg.data_dir / "stealthnode.db"
         if db_path.is_file():
@@ -156,12 +119,11 @@ async def restore(file: UploadFile, request: Request,
     except zipfile.BadZipFile:
         raise HTTPException(400, "Файл не является ZIP-архивом")
     names = set(zf.namelist())
-    if "etc/amneziawg/awg0.conf" not in names:
-        raise HTTPException(400, "В архиве нет awg0.conf — это не бэкап StealthNode")
+    if "etc/xray/config.json" not in names:
+        raise HTTPException(400, "В архиве нет config.json — это не бэкап StealthNode")
 
     restored: list[str] = []
     mapping = {
-        "etc/amneziawg/awg0.conf": cfg.awg_conf_path,
         "etc/xray/config.json": cfg.xray_conf_path,
         "data/stealthnode.db": cfg.data_dir / "stealthnode.db",
         "bot/bot.env": cfg.bot_env_path,
@@ -171,15 +133,9 @@ async def restore(file: UploadFile, request: Request,
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(zf.read(arcname))
             restored.append(arcname)
-    cfg.clients_dir.mkdir(parents=True, exist_ok=True)
-    for arcname in names:
-        if arcname.startswith("clients/") and arcname.endswith(".conf"):
-            (cfg.clients_dir / arcname.split("/", 1)[1]).write_bytes(zf.read(arcname))
-            restored.append(arcname)
 
-    # Перезапуск ядра, чтобы подхватить восстановленные конфиги
-    for cont in (cfg.awg_container, cfg.xray_container):
-        docker_client.action(cont, "restart")
+    # Перезапуск ядра, чтобы подхватить восстановленную конфигурацию
+    docker_client.action(cfg.xray_container, "restart")
 
     audit(db, "settings.restore", f"Восстановлено файлов: {len(restored)}", client_ip(request))
     db.commit()

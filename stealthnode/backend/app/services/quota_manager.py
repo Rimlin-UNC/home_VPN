@@ -14,7 +14,7 @@ from datetime import datetime, time, timedelta
 
 from ..database import SessionLocal
 from ..models import Guest
-from . import traffic_monitor, wg_manager
+from . import traffic_monitor, xray_manager
 
 log = logging.getLogger("stealthnode.quota")
 
@@ -37,26 +37,23 @@ def _in_window(start_s: str | None, end_s: str | None, now: datetime) -> bool:
 
 
 def _set_enabled(guest: Guest, enabled: bool, status: str, detail: str = "") -> None:
-    """Включить/выключить пир гостя с записью статуса."""
+    """Включить/выключить гостя: клиент удаляется/добавляется во все
+    транспорты Xray (мгновенный разрыв текущих сессий)."""
     dev = guest.device
     guest.status = status
     guest.status_detail = detail
     if enabled:
         if not dev.enabled:
-            ok, msg = wg_manager.add_peer(dev.public_key, dev.psk, dev.tunnel_ip)
-            if ok:
-                dev.enabled = True
-                log.info("Гость %s включён (%s)", dev.name, status)
-            else:
-                log.warning("Не удалось включить пир %s: %s", dev.name, msg)
+            xray_manager.add_client(dev.name, client_uuid=dev.public_key)
+            dev.enabled = True
+            log.info("Гость %s включён (%s)", dev.name, status)
     else:
         if dev.enabled:
-            ok, msg = wg_manager.remove_peer(dev.public_key)
-            if ok:
+            if xray_manager.remove_client(dev.public_key):
                 dev.enabled = False
                 log.info("Гость %s отключён: %s (%s)", dev.name, status, detail)
             else:
-                log.warning("Не удалось отключить пир %s: %s", dev.name, msg)
+                log.warning("Не удалось отключить клиента %s", dev.name)
 
 
 def check_guest(guest: Guest, db, now: datetime) -> None:

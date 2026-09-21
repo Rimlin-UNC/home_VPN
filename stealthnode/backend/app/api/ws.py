@@ -11,7 +11,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..config import settings
 from ..security import decode_access_token
-from ..services import docker_client, wg_manager
+from ..services import docker_client, xray_manager
 from ..services.traffic_monitor import monitor
 
 router = APIRouter()
@@ -40,32 +40,28 @@ async def dashboard_ws(ws: WebSocket):
         while True:
             started = time.monotonic()
             try:
-                # Один замер на тик: dump используется и для скоростей, и для статусов
-                peers_raw = wg_manager.dump()
-                cum = monitor.cumulative(peers_raw)
+                # Один замер статистики Xray на тик: и скорости, и статусы
+                raw = xray_manager.user_traffic()
+                cum = monitor.cumulative(raw)
             except Exception:
                 # Ядро VPN недоступно (перезапуск и т.п.) — шлём «пустой» тик,
                 # соединение не рвём: панель продолжит ждать данные
-                peers_raw, cum = [], {}
+                cum = {}
             now = time.monotonic()
             dt = max(now - prev_t, 0.001)
 
-            # Скорость по каждому пиру (байт/с) из приращения кумулятивов
+            # Скорость по каждому пользователю (байт/с) из приращения
             peers_out = []
             total_rx_rate = total_tx_rate = 0.0
-            for peer in peers_raw:
-                pub = peer["public_key"]
-                cur = cum.get(pub, {"rx": 0, "tx": 0})
-                old = prev.get(pub, cur)
+            for email, cur in cum.items():
+                old = prev.get(email, cur)
                 rx_rate = max(0, cur["rx"] - old["rx"]) / dt
                 tx_rate = max(0, cur["tx"] - old["tx"]) / dt
                 total_rx_rate += rx_rate
                 total_tx_rate += tx_rate
-                online = peer["latest_handshake"] > 0 and (time.time() - peer["latest_handshake"]) < 180
                 peers_out.append({
-                    "public_key": pub,
-                    "endpoint": peer["endpoint"],
-                    "online": online,
+                    "name": email,
+                    "online": monitor.is_online(email),
                     "rx_rate": round(rx_rate, 1),   # ↑ загрузка КЛИЕНТА
                     "tx_rate": round(tx_rate, 1),   # ↓ скачивание КЛИЕНТА
                     "cum_rx": cur["rx"], "cum_tx": cur["tx"],

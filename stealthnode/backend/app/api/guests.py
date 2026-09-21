@@ -1,6 +1,7 @@
 # ============================================================
 # StealthNode — гостевые аккаунты (до 5, по ТЗ).
-# Лимиты трафика/скорости, временное окно, срок действия, QoS-приоритет.
+# Лимиты трафика, временное окно, срок действия, приоритет-метка.
+# Ограничено VLESS-клиенты (там есть per-user статистика для квот).
 # ============================================================
 import csv
 import io
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import client_ip, get_current_admin
 from ..models import AdminUser, Device, Guest, TrafficSnapshot
-from ..services import quota_manager, tc_manager, wg_manager
+from ..services import quota_manager, xray_manager
 from ..services.audit import audit
 
 router = APIRouter(prefix="/api/guests", tags=["guests"])
@@ -30,8 +31,6 @@ class GuestIn(BaseModel):
     quota_weekly_mb: int | None = Field(default=None, ge=1)
     quota_monthly_mb: int | None = Field(default=None, ge=1)
     quota_total_mb: int | None = Field(default=None, ge=1)
-    speed_down_mbps: int | None = Field(default=None, ge=1, le=1000)
-    speed_up_mbps: int | None = Field(default=None, ge=1, le=1000)
     window_start: str | None = None  # "HH:MM"
     window_end: str | None = None
     expires_at: datetime | None = None
@@ -51,11 +50,9 @@ def _validate(g: GuestIn) -> None:
 def _guest_out(g: Guest) -> dict:
     d = g.device
     return {
-        "id": g.id, "name": d.name, "tunnel_ip": d.tunnel_ip, "enabled": d.enabled,
-        "device_id": d.id,
+        "id": g.id, "name": d.name, "enabled": d.enabled, "device_id": d.id,
         "quota_daily_mb": g.quota_daily_mb, "quota_weekly_mb": g.quota_weekly_mb,
         "quota_monthly_mb": g.quota_monthly_mb, "quota_total_mb": g.quota_total_mb,
-        "speed_down_mbps": g.speed_down_mbps, "speed_up_mbps": g.speed_up_mbps,
         "window_start": g.window_start, "window_end": g.window_end,
         "expires_at": g.expires_at.isoformat() if g.expires_at else None,
         "priority": g.priority, "status": g.status, "status_detail": g.status_detail,
@@ -79,42 +76,24 @@ def create_guest(data: GuestIn, request: Request,
     if db.query(Device).filter(Device.name == data.name).first():
         raise HTTPException(409, "Имя уже занято")
 
-    # Гость — обычное AWG-устройство + запись лимитов
-    priv, pub = wg_manager.generate_keypair()
-    psk = wg_manager.generate_psk()
-    used = {d.tunnel_ip for d in db.query(Device).all() if d.tunnel_ip}
-    tunnel_ip = wg_manager.free_tunnel_ip(used)
-    ok, msg = wg_manager.add_peer(pub, psk, tunnel_ip)
-    if not ok:
-        raise HTTPException(502, f"Не удалось добавить пира: {msg}")
-
-    dev = Device(name=data.name, kind="awg", tunnel_ip=tunnel_ip,
-                 public_key=pub, private_key=priv, psk=psk, enabled=True)
+    # Гость — VLESS-клиент (сразу во всех транспортах) + запись лимитов
+    new_uuid = xray_manager.add_client(email=data.name)
+    dev = Device(name=data.name, kind="xray", public_key=new_uuid, enabled=True)
     db.add(dev)
     db.flush()
     guest = Guest(
         device_id=dev.id,
         quota_daily_mb=data.quota_daily_mb, quota_weekly_mb=data.quota_weekly_mb,
         quota_monthly_mb=data.quota_monthly_mb, quota_total_mb=data.quota_total_mb,
-        speed_down_mbps=data.speed_down_mbps, speed_up_mbps=data.speed_up_mbps,
         window_start=data.window_start, window_end=data.window_end,
         expires_at=data.expires_at, priority=data.priority,
     )
     db.add(guest)
     db.flush()
 
-    if dev.enabled:
-        tc_manager.apply_limits(tunnel_ip, data.speed_down_mbps,
-                                data.speed_up_mbps, data.priority, guest.id)
     # Сразу применяем автоматику (окно/срок могли быть заданы в прошлое)
     quota_manager.check_guest(guest, db, datetime.utcnow())
-    # Синхронизируем awg0.conf с актуальным состоянием
-    enabled = [
-        {"name": d.name, "public_key": d.public_key, "psk": d.psk, "tunnel_ip": d.tunnel_ip}
-        for d in db.query(Device).filter(Device.kind == "awg", Device.enabled.is_(True)).all()
-    ]
-    wg_manager.rewrite_conf(enabled)
-    audit(db, "guest.create", f"{data.name} ({tunnel_ip})", ip)
+    audit(db, "guest.create", data.name, ip)
     db.commit()
     db.refresh(guest)
     return _guest_out(guest)
@@ -130,12 +109,9 @@ def update_guest(guest_id: int, data: GuestIn, request: Request,
     if guest is None:
         raise HTTPException(404, "Гость не найден")
     for field_ in ("quota_daily_mb", "quota_weekly_mb", "quota_monthly_mb",
-                   "quota_total_mb", "speed_down_mbps", "speed_up_mbps",
-                   "window_start", "window_end", "expires_at", "priority"):
+                   "quota_total_mb", "window_start", "window_end",
+                   "expires_at", "priority"):
         setattr(guest, field_, getattr(data, field_))
-    if guest.device.enabled:
-        tc_manager.apply_limits(guest.device.tunnel_ip, data.speed_down_mbps,
-                                data.speed_up_mbps, data.priority, guest.id)
     quota_manager.check_guest(guest, db, datetime.utcnow())
     audit(db, "guest.update", guest.device.name, ip)
     db.commit()
@@ -150,16 +126,9 @@ def delete_guest(guest_id: int, request: Request,
     if guest is None:
         raise HTTPException(404, "Гость не найден")
     dev = guest.device
-    if dev.enabled:
-        wg_manager.remove_peer(dev.public_key)
-    tc_manager.remove_limits(dev.tunnel_ip, guest.id)
+    xray_manager.remove_client(dev.public_key)
     name = dev.name
     db.delete(dev)  # каскадно удалит гостя и снапшоты
-    enabled = [
-        {"name": d.name, "public_key": d.public_key, "psk": d.psk, "tunnel_ip": d.tunnel_ip}
-        for d in db.query(Device).filter(Device.kind == "awg", Device.enabled.is_(True)).all()
-    ]
-    wg_manager.rewrite_conf(enabled)
     audit(db, "guest.delete", name, client_ip(request))
     db.commit()
 
@@ -174,7 +143,7 @@ def export_guest_csv(guest_id: int,
         raise HTTPException(404, "Гость не найден")
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["timestamp_utc", "cum_rx_bytes", "cum_tx_bytes"])
+    writer.writerow(["timestamp_utc", "cum_upload_bytes", "cum_download_bytes"])
     for s in (db.query(TrafficSnapshot)
               .filter(TrafficSnapshot.device_id == guest.device_id)
               .order_by(TrafficSnapshot.ts).all()):

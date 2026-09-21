@@ -1,51 +1,15 @@
 # ============================================================
 # StealthNode — оркестрация всех сервисов (один VPS).
-# Все компоненты изолированы в Docker-контейнерах.
+# Ядро обхода ТСПУ-2026:
+#   * Xray VLESS+REALITY (TCP/Vision :443 + gRPC + XHTTP) — основа;
+#   * Hysteria2 + Salamander (QUIC/UDP) — резерв (сети с потерями,
+#     провайдеры, где TCP-профиль уже детектируется).
 # Запуск: docker compose up -d --build
 # ============================================================
 name: stealthnode
 
 services:
-  # --------------------- AmneziaWG (основной туннель) ---------------------
-  amneziawg:
-    build:
-      context: ./amneziawg
-      args:
-        # Закреплённые версии AmneziaWG 3.1 (проверено в сентябре 2026)
-        AWG_GO_REF: v3.1.20260812
-        AWG_TOOLS_REF: v3.1.20260812
-    image: stealthnode/amneziawg:3.1
-    container_name: stealthnode-amneziawg
-    restart: unless-stopped
-    cap_add:
-      - NET_ADMIN   # управление интерфейсом awg0, tc, nftables внутри контейнера
-      - NET_RAW
-    devices:
-      - /dev/net/tun  # userspace-реализация (amneziawg-go) работает через TUN
-    sysctls:
-      # Форвардинг внутри namespace контейнера (клиенты -> интернет)
-      net.ipv4.ip_forward: "1"
-      net.ipv4.conf.all.src_valid_mark: "1"
-    ports:
-      # Снаружи — случайный UDP-порт из .env; внутри контейнера всегда 51820
-      - "${AWG_PORT}:51820/udp"
-    volumes:
-      - ./amneziawg/conf:/etc/amneziawg:rw
-    networks:
-      stealthnet:
-        ipv4_address: 172.20.0.2
-    env_file: .env
-    environment:
-      # Адрес внутреннего DNS-резолвера (перехват :53 клиентов идёт сюда)
-      DNSCRYPT_IP: 172.20.0.10
-    healthcheck:
-      test: ["CMD", "awg", "show", "awg0"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # --------------------- Xray VLESS + REALITY (резерв) ---------------------
+  # --------------------- Xray (основной VPN) ---------------------
   xray:
     build:
       context: ./xray
@@ -58,14 +22,44 @@ services:
     container_name: stealthnode-xray
     restart: unless-stopped
     ports:
-      - "443:443/tcp"
+      - "443:443/tcp"                 # профиль TCP/Vision (основной)
+      - "${XRAY_GRPC_PORT}:44301/tcp" # профиль gRPC  (резерв №1)
+      - "${XRAY_XHTTP_PORT}:44302/tcp"# профиль XHTTP (резерв №2)
     volumes:
       - ./xray/conf:/etc/xray:rw
     networks:
       stealthnet:
         ipv4_address: 172.20.0.20
+    # Все DNS-запросы пользователей VPN уходят через наш шифрованный резолвер
+    dns:
+      - 172.20.0.10
     healthcheck:
       test: ["CMD-SHELL", "pgrep -x xray >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------- Hysteria2 (резервный VPN) ---------------------
+  hysteria:
+    build:
+      context: ./hysteria
+      args:
+        HYSTERIA_VERSION: 2.12.3
+    image: stealthnode/hysteria:2.12.3
+    container_name: stealthnode-hysteria
+    restart: unless-stopped
+    ports:
+      - "${HY2_PORT}:9999/udp"  # снаружи — случайный UDP-порт
+    volumes:
+      - ./hysteria/conf:/etc/hysteria:ro
+    networks:
+      stealthnet:
+        ipv4_address: 172.20.0.25
+    # Включая DNS резолвера: никаких утечек plaintext-DNS
+    dns:
+      - 172.20.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x hysteria >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -98,9 +92,8 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock      # управление контейнерами (бот, перезапуски)
+      - /var/run/docker.sock:/var/run/docker.sock      # управление контейнерами (бот, перезапуски, статистика)
       - ./data:/app/data                                # SQLite + снапшоты трафика
-      - ./amneziawg/conf:/etc/amneziawg:rw              # конфиги AWG и клиентские .conf
       - ./xray/conf:/etc/xray:rw                        # конфиг Xray (управление клиентами)
       - ./trading-bot/bot.env:/app/bot/bot.env:rw       # настройки бота (редактор в панели)
       - ./trading-bot/logs:/app/bot/logs                # логи и status.json бота
@@ -108,7 +101,7 @@ services:
       stealthnet:
         ipv4_address: 172.20.0.30
     depends_on:
-      amneziawg:
+      xray:
         condition: service_healthy
       dnscrypt:
         condition: service_started
@@ -121,7 +114,6 @@ services:
 
   # --------------------- Caddy (HTTPS + сокрытие панели) ---------------------
   caddy:
-    # Закреплённая мажорно-минорная версия; alpine-образ минимален
     image: caddy:2.8-alpine
     container_name: stealthnode-caddy
     restart: unless-stopped
@@ -153,7 +145,7 @@ services:
     image: stealthnode/trading-bot:latest
     container_name: stealthnode-trading-bot
     restart: unless-stopped
-    # Жёсткие лимиты, чтобы бот НИКОГДА не мешал VPN (см. ТЗ п.4.4)
+    # Жёсткие лимиты, чтобы бот НИКОГДА не мешал VPN
     deploy:
       resources:
         limits:
@@ -168,13 +160,11 @@ services:
       - botnet
 
 networks:
-  # Внутренняя сеть VPN-стека (фиксированные адреса нужны для DNS-перехвата)
   stealthnet:
     driver: bridge
     ipam:
       config:
         - subnet: 172.20.0.0/24
-  # Изолированная сеть торгового бота (только выход в интернет через NAT)
   botnet:
     driver: bridge
 

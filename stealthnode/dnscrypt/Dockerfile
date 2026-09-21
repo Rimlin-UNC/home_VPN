@@ -1,8 +1,9 @@
 # ============================================================
 # StealthNode — контейнер dnscrypt-proxy.
-# Внутренний DNS-резолвер VPN-клиентов: весь plaintext-DNS из
-# туннеля перехватывается (DNAT в контейнере amneziawg) и уходит
-# наружу уже шифрованным (DNSCrypt/DoH, в 2.1.18 — с PQDNSCrypt).
+# DNS-резолвер всех контейнеров стека (xray/hysteria и др. ходят через
+# него, см. dns: в docker-compose): исходящие запросы уходят наружу уже
+# шифрованными (DNSCrypt/DoH, в 2.1.18 — с PQDNSCrypt). Plaintext-DNS
+# клиентов проксирует сам Xray (freedom/outbound), никакого DNAT нет.
 # ============================================================
 FROM ubuntu:24.04
 ARG DNSCRYPT_VERSION=2.1.18

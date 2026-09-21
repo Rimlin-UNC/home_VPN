@@ -38,8 +38,7 @@ function fmtBytes(bytes, perSec = false) {
   return v.toFixed(v >= 100 || i === 0 ? 0 : 1) + " " + units[i] + (perSec ? "/с" : "");
 }
 
-function fmtMb(mb) { return mb == null ? "∞" : mb + " МБ"; }
-function fmtMbps(mb) { return mb == null ? "∞" : mb + " Мбит/с"; }
+
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g,
@@ -310,16 +309,9 @@ async function loadServicesTable() {
   } catch (e) { toast(e.message, true); }
 }
 
-let peerNamesCache = {};
 async function updateDashboardLive() {
   const data = state.wsData;
   if (!data) return;
-  if (Object.keys(peerNamesCache).length === 0) {
-    try {
-      const devices = await api("devices");
-      peerNamesCache = Object.fromEntries(devices.map((d) => [d.public_key, d.name]));
-    } catch { return; }
-  }
   // Живые индикаторы системы (карточки обновляем лёгким способом)
   if (data.system) {
     const cards = $("#sys-cards");
@@ -341,14 +333,14 @@ async function updateDashboardLive() {
         <td>${s.cpu_pct}%</td><td>${s.mem_mb} МБ</td></tr>`;
     }).join("");
   }
-  // Графики пиров
+  // Графики пользователей
   const grid = $("#peer-charts");
   const np = $("#no-peers");
   if (!grid) return;
-  np.textContent = data.peers.length === 0 ? "Пока нет пиров — данные появятся после подключения устройств." : "";
+  np.textContent = data.peers.length === 0 ? "Пока нет трафика — данные появятся после подключения устройств." : "";
   const seen = new Set();
   data.peers.forEach((p) => {
-    const name = peerNamesCache[p.public_key] || p.public_key.slice(0, 8) + "…";
+    const name = p.name;
     seen.add(name);
     const sum = p.rx_rate + p.tx_rate;
     pushBuffer(name, sum);
@@ -367,7 +359,6 @@ async function updateDashboardLive() {
     card.querySelector(".rate").textContent = `↓${fmtBytes(p.tx_rate, true)} ↑${fmtBytes(p.rx_rate, true)}`;
     card.querySelector(".dot").className = "dot " + (p.online ? "dot-green" : "dot-gray");
     card.querySelector(".small").textContent =
-      (p.endpoint ? `Внешний IP: ${p.endpoint.split(":")[0]} · ` : "") +
       `Всего ↓${fmtBytes(p.cum_tx)} ↑${fmtBytes(p.cum_rx)}`;
     drawSpark(card.querySelector("canvas"), state.chartBuffers[name],
       p.online ? "#4c9aff" : "#2d333b");
@@ -385,19 +376,16 @@ async function renderDevices() {
       <h2>Создать устройство</h2>
       <div class="form-grid">
         <label>Имя <input id="dev-name" placeholder="iphone-anna"></label>
-        <label>Протокол <select id="dev-kind">
-          <option value="awg">AmneziaWG (основной)</option>
-          <option value="xray">Xray VLESS+REALITY (резервный)</option>
-        </select></label>
       </div>
       <button id="dev-create" class="btn btn-primary">Создать</button>
-      <p class="muted" style="margin-top:8px">Импортируйте .conf в AmneziaVPN (ПК)
-        или отсканируйте QR в приложении (смартфон).</p>
+      <p class="muted" style="margin-top:8px">Каждое устройство получает <b>3 ссылки</b>
+        (TCP/Vision, gRPC, XHTTP) — импортируйте все, клиент сам выберет рабочую.
+        Клиенты: v2rayNG, Streisand, Nekoray, Happ, Clash Verge.</p>
     </div>
     <div class="section">
       <h2>Устройства</h2>
       <div class="table-wrap"><table id="dev-table">
-        <thead><tr><th></th><th>Имя</th><th>Протокол</th><th>IP туннеля</th>
+        <thead><tr><th></th><th>Имя</th><th>Профиль</th>
           <th>Гость</th><th style="width:270px">Действия</th></tr></thead>
         <tbody></tbody>
       </table></div>
@@ -406,6 +394,8 @@ async function renderDevices() {
   await loadDevices();
 }
 
+const TRANSPORT_LABELS = { tcp: "TCP / Vision (основной)", grpc: "gRPC (резерв)", xhttp: "XHTTP (резерв)" };
+
 async function loadDevices() {
   try {
     const devices = await api("devices");
@@ -413,11 +403,10 @@ async function loadDevices() {
       <tr>
         <td><span class="dot ${d.enabled ? "dot-green" : "dot-red"}"></span></td>
         <td>${escapeHtml(d.name)}${d.is_admin_device ? ' <span class="badge badge-ok">админ</span>' : ""}</td>
-        <td><span class="badge">${d.kind === "awg" ? "AmneziaWG" : "Xray"}</span></td>
-        <td class="mono">${d.tunnel_ip || "—"}</td>
+        <td><span class="badge">VLESS+REALITY ×3</span></td>
         <td>${d.guest_id ? '<span class="badge badge-warn">гость #' + d.guest_id + "</span>" : "—"}</td>
         <td>
-          <button class="btn btn-small" onclick="showConfig(${d.id})">Конфиг/QR</button>
+          <button class="btn btn-small" onclick="showConfig(${d.id})">Ссылки/QR</button>
           <button class="btn btn-small" onclick="downloadConfig(${d.id}, '${escapeHtml(d.name)}')">⬇</button>
           <button class="btn btn-small" onclick="toggleDevice(${d.id}, ${d.enabled})">${d.enabled ? "Выключить" : "Включить"}</button>
           <button class="btn btn-small btn-danger" onclick="deleteDevice(${d.id})">✕</button>
@@ -428,13 +417,12 @@ async function loadDevices() {
 
 async function createDevice() {
   const name = $("#dev-name").value.trim();
-  const kind = $("#dev-kind").value;
   if (!name) return toast("Введите имя устройства", true);
   try {
     const dev = await api("devices", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, kind }),
+      body: JSON.stringify({ name }),
     });
     toast("Устройство «" + name + "» создано");
     await loadDevices();
@@ -445,27 +433,26 @@ async function createDevice() {
 window.showConfig = async function (id) {
   try {
     const data = await api(`devices/${id}/config`);
-    const qrBlob = await downloadAuthed(`devices/${id}/qr`);
+    const qrBlob = await downloadAuthed(`devices/${id}/qr?transport=tcp`);
     const qrUrl = URL.createObjectURL(qrBlob);
-    const isXray = data.config.startsWith("vless://");
+    const linksHtml = Object.entries(data.links || {}).map(([k, v]) =>
+      `<p class="muted">${TRANSPORT_LABELS[k] || k}</p><pre class="mono">${escapeHtml(v)}</pre>`
+    ).join("");
     openModal(`
-      <h2>Конфиг: ${escapeHtml(data.name)}</h2>
+      <h2>${escapeHtml(data.name)}</h2>
       <img class="qr" src="${qrUrl}" alt="QR-код">
-      <p class="muted">${isXray
-        ? "Отсканируйте QR или вставьте ссылку в клиент (v2rayNG, Streisand, Nekoray)."
-        : "Отсканируйте QR в AmneziaVPN или импортируйте файл .conf ниже."}</p>
-      <pre class="mono">${escapeHtml(data.config)}</pre>`);
+      <p class="muted">QR — основной профиль (TCP/Vision :443). Отсканируйте или скопируйте ссылки:</p>
+      ${linksHtml}`);
   } catch (e) { toast(e.message, true); }
 };
 
 window.downloadConfig = async function (id, name) {
   try {
     const data = await api(`devices/${id}/config`);
-    const isXray = data.config.startsWith("vless://");
     const blob = new Blob([data.config], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = name + (isXray ? ".txt" : ".conf");
+    a.href = url; a.download = name + "-links.txt";
     a.click(); URL.revokeObjectURL(url);
   } catch (e) { toast(e.message, true); }
 };
@@ -498,12 +485,10 @@ async function renderGuests() {
         <label>Лимит/неделю, МБ <input id="g-weekly" type="number" min="1" placeholder="∞"></label>
         <label>Лимит/месяц, МБ <input id="g-monthly" type="number" min="1" placeholder="∞"></label>
         <label>Общий лимит, МБ <input id="g-total" type="number" min="1" placeholder="∞"></label>
-        <label>Скорость ↓, Мбит/с <input id="g-down" type="number" min="1" max="1000" placeholder="∞"></label>
-        <label>Скорость ↑, Мбит/с <input id="g-up" type="number" min="1" max="1000" placeholder="∞"></label>
         <label>Окно доступа с <input id="g-wstart" placeholder="08:00"></label>
         <label>Окно доступа до <input id="g-wend" placeholder="23:00"></label>
         <label>Действует до <input id="g-exp" type="datetime-local"></label>
-        <label>Приоритет QoS <select id="g-prio">
+        <label>Приоритет <select id="g-prio">
           <option value="low">Низкий</option>
           <option value="normal" selected>Средний</option>
           <option value="high">Высокий</option></select></label>
@@ -513,8 +498,8 @@ async function renderGuests() {
     <div class="section">
       <h2>Гостевые аккаунты</h2>
       <div class="table-wrap"><table id="g-table">
-        <thead><tr><th></th><th>Имя</th><th>IP</th><th>Лимиты</th><th>Скорость</th>
-          <th>Окно</th><th>Статус</th><th></th></tr></thead>
+        <thead><tr><th></th><th>Имя</th><th>Лимиты, МБ</th>
+          <th>Окно</th><th>Срок</th><th>Статус</th><th></th></tr></thead>
         <tbody></tbody>
       </table></div>
     </div>`;
@@ -535,7 +520,6 @@ async function createGuest() {
     name,
     quota_daily_mb: numOrNull("#g-daily"), quota_weekly_mb: numOrNull("#g-weekly"),
     quota_monthly_mb: numOrNull("#g-monthly"), quota_total_mb: numOrNull("#g-total"),
-    speed_down_mbps: numOrNull("#g-down"), speed_up_mbps: numOrNull("#g-up"),
     window_start: $("#g-wstart").value.trim() || null,
     window_end: $("#g-wend").value.trim() || null,
     expires_at: exp ? new Date(exp).toISOString() : null,
@@ -547,7 +531,7 @@ async function createGuest() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    toast("Гость «" + name + "» создан — конфиг на вкладке «Устройства»");
+    toast("Гость «" + name + "» создан — ссылки на вкладке «Устройства»");
     await loadGuests();
   } catch (e) { toast(e.message, true); }
 }
@@ -567,13 +551,13 @@ async function loadGuests() {
         g.quota_weekly_mb && "н:" + g.quota_weekly_mb,
         g.quota_monthly_mb && "м:" + g.quota_monthly_mb,
         g.quota_total_mb && "всего:" + g.quota_total_mb].filter(Boolean).join(", ") || "∞";
+      const exp = g.expires_at ? g.expires_at.slice(0, 10) : "—";
       return `<tr>
         <td><span class="dot ${g.enabled ? "dot-green" : "dot-red"}"></span></td>
         <td>${escapeHtml(g.name)}</td>
-        <td class="mono">${g.tunnel_ip}</td>
-        <td>${limits} МБ</td>
-        <td>↓${fmtMbps(g.speed_down_mbps)} ↑${fmtMbps(g.speed_up_mbps)}</td>
+        <td>${limits}</td>
         <td>${g.window_start ? g.window_start + "–" + g.window_end : "—"}</td>
+        <td>${exp}</td>
         <td><span class="badge ${st[1]}" title="${escapeHtml(g.status_detail)}">${st[0]}</span></td>
         <td>
           <button class="btn btn-small" onclick="guestCsv(${g.id})">CSV</button>
@@ -675,15 +659,15 @@ window.saveBotEnv = async function () {
 /* ---------- Настройки ---------- */
 async function renderSettings() {
   $("#content").innerHTML = `
-    <div class="section"><h2>Обфускация AmneziaWG</h2>
-      <div class="form-grid" id="awg-form"></div>
-      <button class="btn btn-primary" onclick="saveAwg()">Применить (перезапуск AWG)</button>
-      <p class="muted" style="margin-top:6px">⚠️ После изменения перевыпустите клиентские конфиги!</p></div>
+    <div class="section"><h2>Ссылки владельца</h2>
+      <div id="owner-links"></div>
+      <p class="muted" style="margin-top:6px">Держите в запасе все варианты: если у вашего провайдера
+        ТСПУ детектирует TCP-профиль, переключайтесь на gRPC/XHTTP или Hysteria2.</p></div>
     <div class="section"><h2>Маскировка Xray REALITY</h2>
       <div class="form-grid"><label>Домен маскировки (SNI) <input id="reality-sni"></label></div>
       <button class="btn btn-primary" onclick="saveReality()">Применить (перезапуск Xray)</button>
       <p class="muted" style="margin-top:6px">Требования к домену: TLS 1.3 + HTTP/2, не google/microsoft,
-        популярен у провайдеров (банк, e-commerce).</p></div>
+        популярен у провайдеров (max.ru, yandex.ru, mail.ru, vk.com, ozon.ru).</p></div>
     <div class="section"><h2>Смена пароля</h2>
       <div class="form-grid">
         <label>Текущий пароль <input id="pw-old" type="password"></label>
@@ -696,27 +680,16 @@ async function renderSettings() {
         <input id="restore-file" type="file" accept=".zip" class="hidden"></label>
       <p class="muted" style="margin-top:6px">Бэкап содержит ключи — храните его в безопасном месте!</p></div>`;
   try {
-    const [awg, reality] = await Promise.all([api("settings/awg"), api("settings/reality")]);
-    $("#awg-form").innerHTML = Object.entries(awg.params).map(([k, v]) =>
-      `<label>${k} <input data-awg="${k}" value="${escapeHtml(v)}"></label>`).join("") +
-      `<label>Порт UDP <input value="${awg.awg_port}" disabled></label>
-       <label>MTU <input value="${awg.awg_mtu}" disabled></label>`;
+    const [links, reality] = await Promise.all([api("settings/links"), api("settings/reality")]);
+    const labels = { tcp: "VLESS TCP / Vision (основной)", grpc: "VLESS gRPC (резерв)",
+                     xhttp: "VLESS XHTTP (резерв)", hy2: "Hysteria2 (резерв)" };
+    $("#owner-links").innerHTML = Object.entries(links).map(([k, v]) =>
+      `<p class="muted">${labels[k] || k}</p><pre class="mono" style="white-space:pre-wrap;word-break:break-all">${escapeHtml(v)}</pre>`
+    ).join("");
     $("#reality-sni").value = reality.sni;
   } catch (e) { toast(e.message, true); }
   $("#restore-file").addEventListener("change", doRestore);
 }
-
-window.saveAwg = async function () {
-  const params = {};
-  document.querySelectorAll("[data-awg]").forEach((el) => { params[el.dataset.awg] = el.value.trim(); });
-  try {
-    const res = await api("settings/awg", {
-      method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ params }),
-    });
-    toast(res.message);
-  } catch (e) { toast(e.message, true); }
-};
 
 window.saveReality = async function () {
   try {

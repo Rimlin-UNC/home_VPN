@@ -7,10 +7,12 @@
 .env
 trading-bot/bot.env
 
-# Сгенерированные конфиги (содержат приватные ключи!)
-amneziawg/conf/awg0.conf
-amneziawg/conf/clients/
+# Сгенерированные конфиги (содержат приватные ключи/пароли!)
 xray/conf/config.json
+xray/conf/share/
+hysteria/conf/hysteria.yaml
+hysteria/conf/server.crt
+hysteria/conf/server.key
 caddy/Caddyfile
 
 # Данные панели (SQLite, снапшоты трафика)

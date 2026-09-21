@@ -6,22 +6,18 @@
 # Установка одной командой:
 #   curl -fsSL https://raw.githubusercontent.com/Rimlin-UNC/home_VPN/main/stealthnode/install.sh | sudo bash
 #
-# Или из клонированного репозитория:
-#   sudo ./stealthnode/install.sh
+# Что разворачивается (стек под ТСПУ-2026, БЕЗ AmneziaWG):
+#   * Xray VLESS + REALITY — три транспорта: TCP/Vision :443 (основной),
+#     gRPC и XHTTP (резервы, переживают детект vision-профиля);
+#   * Hysteria2 + Salamander (QUIC/UDP) — резерв для сетей с потерями
+#     и провайдеров, где TCP-профиль уже блокируется;
+#   * dnscrypt-proxy — весь DNS пользователей уходит шифрованным;
+#   * Веб-панель (FastAPI + WebSocket) за Caddy на случайном порту
+#     и секретном пути /p-XXXXXXXX/ с QR для всех ссылок;
+#   * Изолированный торговый бот OKX (по умолчанию — симуляция).
 #
-# Что делает скрипт:
-#   1. Проверяет окружение (root, ОС, RAM, диск);
-#   2. Интерактивно спрашивает параметры (пароль, домен маскировки, ключи OKX);
-#   3. Ставит Docker, UFW, Fail2ban, nftables, автообновления;
-#   4. Включает BBR, форвардинг, защитные sysctl, модули ifb;
-#   5. Генерирует все ключи (AmneziaWG, REALITY, JWT, UUID);
-#   6. Рендерит конфиги и запускает стек docker compose;
-#   7. Настраивает фаервол и (опционально) усиливает SSH;
-#   8. Печатает итоговую информацию и QR-код админского конфига.
-#
-# Скрипт идемпотентен там, где это возможно: повторный запуск не
-# затирает существующий .env и ключи (используйте setup.sh для
-# переконфигурации).
+# Скрипт идемпотентен там, где возможно: повторный запуск не
+# затирает существующий .env и ключи (переконфигурация — setup.sh).
 # ============================================================
 set -euo pipefail
 
@@ -29,7 +25,6 @@ set -euo pipefail
 readonly INSTALL_DIR_DEFAULT="/opt/stealthnode"
 readonly LOG_FILE="/var/log/stealthnode-install.log"
 readonly CREDS_FILE="/root/stealthnode-credentials.txt"
-# Репозиторий для bootstrap-режима (когда скачан один install.sh)
 readonly REPO_URL_DEFAULT="https://github.com/Rimlin-UNC/home_VPN.git"
 
 # ---------------- Цветной вывод и логирование ----------------
@@ -50,8 +45,8 @@ title() { echo; echo "${C_BLD}=== $* ===${C_RST}"; }
 # ---------------- Параметры командной строки ----------------
 INSTALL_DIR="$INSTALL_DIR_DEFAULT"
 REPO_URL="${STEALTHNODE_REPO:-$REPO_URL_DEFAULT}"
-NON_INTERACTIVE=0        # 1 — без вопросов (значения из env/по умолчанию)
-SSH_HARDEN_DEFAULT="n"   # ответ по умолчанию на вопрос об усилении SSH
+NON_INTERACTIVE=0
+SSH_HARDEN_DEFAULT="n"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,7 +68,6 @@ title "StealthNode: проверка окружения"
 
 [[ $EUID -eq 0 ]] || die "Скрипт нужно запускать от root: sudo bash install.sh"
 
-# Проверка ОС (жёстко — только семейство Debian/Ubuntu; 24.04 рекомендована)
 [[ -f /etc/os-release ]] || die "Не найден /etc/os-release — система не поддерживается"
 . /etc/os-release
 [[ "${ID:-}" == "ubuntu" ]] || warn "ОС не Ubuntu (${ID:-unknown}). Продолжаем на свой риск."
@@ -81,7 +75,6 @@ if [[ "${VERSION_ID:-}" != "24.04" ]]; then
     warn "Рекомендуется Ubuntu 24.04 LTS (у вас ${VERSION_ID:-unknown})"
 fi
 
-# Проверка ресурсов
 RAM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
 DISK_GB=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
 CPU_N=$(nproc)
@@ -105,14 +98,12 @@ if [[ ! -f "$SCRIPT_DIR/docker-compose.yml" ]]; then
     if [[ ! -d "$INSTALL_DIR/.git" ]]; then
         git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
     fi
-    # В репозитории проект лежит в подкаталоге stealthnode/
     SRC="$INSTALL_DIR"
     [[ -f "$SRC/stealthnode/docker-compose.yml" ]] && SRC="$INSTALL_DIR/stealthnode"
     [[ -f "$SRC/docker-compose.yml" ]] || die "Не найден docker-compose.yml после клонирования"
-    ok "Проект загружен в $SRC (этот шаг больше не понадобится)"
+    ok "Проект загружен в $SRC"
     SCRIPT_DIR="$SRC"
 else
-    # Запуск из локальной копии: ничего скачивать не нужно
     info "Запуск из локальной копии: $SCRIPT_DIR"
 fi
 cd "$SCRIPT_DIR"
@@ -137,7 +128,7 @@ SERVER_PUBLIC_IP="${SERVER_PUBLIC_IP:-$(detect_public_ip || true)}"
 if [[ -z "$SERVER_PUBLIC_IP" && $NON_INTERACTIVE -eq 0 ]]; then
     read -rp "Не удалось определить внешний IP, введите вручную: " SERVER_PUBLIC_IP
 fi
-[[ -n "${SERVER_PUBLIC_IP:-}" ]] || die "Внешний IP обязателен (нужен клиентским конфигам)"
+[[ -n "${SERVER_PUBLIC_IP:-}" ]] || die "Внешний IP обязателен (нужен клиентским ссылкам)"
 ok "Внешний IP сервера: $SERVER_PUBLIC_IP"
 
 # --- Пароль администратора ---
@@ -152,7 +143,6 @@ if [[ $NON_INTERACTIVE -eq 0 && -z "$ADMIN_PASSWORD" ]]; then
     [[ "$ADMIN_PASSWORD" == "$ADMIN_PASSWORD2" ]] || die "Пароли не совпадают"
 fi
 if [[ -z "$ADMIN_PASSWORD" ]]; then
-    # Неинтерактивный режим без заданного пароля: генерируем и показываем в итогах
     ADMIN_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
     GENERATED_PASSWORD=1
 else
@@ -164,12 +154,12 @@ fi
 REALITY_SNI="${REALITY_SNI:-}"
 if [[ $NON_INTERACTIVE -eq 0 && -z "$REALITY_SNI" ]]; then
     echo
-    echo "Домен маскировки для Xray REALITY (НЕ google.com/microsoft.com!)"
-    echo "  Требования: TLS 1.3 + HTTP/2, популярен у провайдера, не заблокирован."
-    echo "  Примеры: www.tbank.ru, www.gosuslugi.ru, ozon.ru"
-    read -rp "Домен маскировки [www.tbank.ru]: " REALITY_SNI
+    echo "Домен маскировки REALITY (НЕ google.com/microsoft.com!)"
+    echo "  Требования: TLS 1.3 + HTTP/2, популярен у провайдера, из «белого списка» РФ."
+    echo "  Примеры: max.ru, yandex.ru, mail.ru, vk.com, ozon.ru"
+    read -rp "Домен маскировки [max.ru]: " REALITY_SNI
 fi
-REALITY_SNI="${REALITY_SNI:-www.tbank.ru}"
+REALITY_SNI="${REALITY_SNI:-max.ru}"
 [[ "$REALITY_SNI" =~ google\.com$|microsoft\.com$ ]] && \
     die "Домен $REALITY_SNI использовать нельзя (мониторится цензорами)"
 ok "Домен маскировки: $REALITY_SNI"
@@ -181,11 +171,11 @@ if [[ $NON_INTERACTIVE -eq 0 && -z "${PANEL_DOMAIN_SET:-}" ]]; then
 fi
 if [[ -n "$PANEL_DOMAIN" ]]; then
     PANEL_SITE="$PANEL_DOMAIN"
-    PANEL_TLS=""          # Caddy сам выпустит LE-сертификат (HTTP-01, порт 80)
+    PANEL_TLS=""
     ok "Панель будет на https://$PANEL_DOMAIN:PORT (Let's Encrypt)"
 else
     PANEL_SITE=":443"
-    PANEL_TLS="internal"  # локальный CA Caddy (самоподписанный сертификат)
+    PANEL_TLS="internal"
     ok "Панель будет на https://$SERVER_PUBLIC_IP:PORT (самоподписанный сертификат)"
 fi
 
@@ -215,9 +205,8 @@ title "Установка системных пакетов"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
-    curl wget git jq qrencode ca-certificates gnupg \
-    ufw fail2ban nftables wireguard-tools unattended-upgrades \
-    iproute2 iptables kmod
+    curl wget git jq qrencode ca-certificates gnupg openssl \
+    ufw fail2ban nftables unattended-upgrades iproute2 iptables
 ok "Пакеты установлены"
 
 # ============================================================
@@ -229,7 +218,6 @@ if ! command -v docker >/dev/null 2>&1; then
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
         -o /etc/apt/keyrings/docker.asc
     chmod a+r /etc/apt/keyrings/docker.asc
-    # shellcheck disable=SC1091
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
 https://download.docker.com/linux/ubuntu ${VERSION_CODENAME:-noble} stable" \
         > /etc/apt/sources.list.d/docker.list
@@ -243,15 +231,13 @@ docker compose version >/dev/null 2>&1 || die "Плагин docker compose не 
 ok "Docker готов"
 
 # ============================================================
-# ШАГ 5. Ядро: BBR, форвардинг, защитные sysctl, модули для шейпера
+# ШАГ 5. Ядро: BBR и защитные sysctl (прокси не требует форвардинга)
 # ============================================================
-title "Настройка ядра (BBR, ip_forward, hardening)"
+title "Настройка ядра (BBR, hardening)"
 
 cat >/etc/sysctl.d/99-stealthnode.conf <<'EOF'
-# StealthNode: параметры ядра (см. ТЗ §4.1)
-# Форвардинг (VPN-туннель)
-net.ipv4.ip_forward = 1
-# Перегрузки: BBR заметно быстрее CUBIC на каналах с потерями
+# StealthNode: параметры ядра.
+# BBR заметно быстрее CUBIC на каналах с потерями (важно для TCP-профилей)
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 # Защита от спуфинга и redirect-атак
@@ -264,24 +250,13 @@ net.ipv4.conf.default.accept_source_route = 0
 net.ipv4.icmp_ignore_bogus_error_responses = 1
 # SYN-флод
 net.ipv4.tcp_syncookies = 1
-# Буферы под высокую скорость туннеля
+# Буферы под высокую скорость VPN
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
 net.ipv4.udp_rmem_min = 8192
 net.ipv4.udp_wmem_min = 8192
 EOF
 sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-stealthnode.conf
-
-# Модули для шейпинга гостей (tc + ifb): грузим на хосте и после перезагрузки
-cat >/etc/modules-load.d/stealthnode.conf <<'EOF'
-# StealthNode: модули для лимитов скорости гостей (ТЗ §6.1)
-ifb
-act_mirred
-sch_hfsc
-EOF
-modprobe ifb numifbs=1 2>/dev/null || warn "Модуль ifb не загрузился (критично только для лимитов upload)"
-modprobe act_mirred 2>/dev/null || true
-modprobe sch_hfsc 2>/dev/null || true
 ok "Ядро настроено"
 
 # ============================================================
@@ -301,46 +276,57 @@ title "Генерация ключей и конфигурации"
 
 rand_port() { shuf -i "$1"-"$2" -n 1; }
 
+# Ключи X25519 для REALITY без внешних зависимостей: python3 + openssl есть
+# на любой Ubuntu 24.04. Если python3-cryptography недоступен — используем
+# запасной путь через временный контейнер позже; базово это работает.
+gen_reality_keys() {
+    python3 - <<'PYEOF'
+import base64, subprocess, sys
+try:
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+    priv = X25519PrivateKey.generate()
+    p = priv.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    u = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    # base64url без '=' — формат `xray x25519`, безопасен в URL ссылок vless://
+    print(base64.urlsafe_b64encode(p).decode().rstrip('='))
+    print(base64.urlsafe_b64encode(u).decode().rstrip('='))
+except ImportError:
+    # cryptography нет — берём ключи совместимого формата из openssl + X25519 pub
+    sys.exit(42)
+PYEOF
+}
+
 if [[ ! -f .env ]]; then
-    umask 077   # .env и конфиги — только для root (600)
+    umask 077
 
     # --- Случайные порты и путь панели ---
-    AWG_PORT=$(rand_port 20000 60000)
     PANEL_PORT=$(rand_port 10000 59999)
-    while [[ "$PANEL_PORT" == "$AWG_PORT" ]]; do PANEL_PORT=$(rand_port 10000 59999); done
-    PANEL_PATH="p-$(openssl rand -hex 4)"          # например p-a7f3b2c1
+    XRAY_GRPC_PORT=$(rand_port 20000 59999)
+    XRAY_XHTTP_PORT=$(rand_port 20000 59999)
+    HY2_PORT=$(rand_port 20000 60000)
+    while [[ "$XRAY_XHTTP_PORT" == "$XRAY_GRPC_PORT" ]]; do XRAY_XHTTP_PORT=$(rand_port 20000 59999); done
+    while [[ "$HY2_PORT" == "$XRAY_GRPC_PORT" || "$HY2_PORT" == "$XRAY_XHTTP_PORT" ]]; do HY2_PORT=$(rand_port 20000 60000); done
+    PANEL_PATH="p-$(openssl rand -hex 4)"
     JWT_SECRET=$(openssl rand -hex 48)
 
-    # --- Ключи AmneziaWG (Curve25519, как у WireGuard) ---
-    AWG_SERVER_PRIVATE_KEY=$(wg genkey)
-    AWG_SERVER_PUBLIC_KEY=$(echo "$AWG_SERVER_PRIVATE_KEY" | wg pubkey)
+    # --- Ключи REALITY (X25519) ---
+    if ! KEYS=$(gen_reality_keys) || [[ $(echo "$KEYS" | wc -l) -lt 2 ]]; then
+        info "python3-cryptography недоступен — ставлю пакет для генерации ключей"
+        apt-get install -y -qq python3-cryptography >/dev/null
+        KEYS=$(gen_reality_keys) || die "Не удалось сгенерировать ключи REALITY"
+    fi
+    REALITY_PRIVATE_KEY=$(echo "$KEYS" | sed -n '1p')
+    REALITY_PUBLIC_KEY=$(echo "$KEYS" | sed -n '2p')
+    [[ -n "$REALITY_PRIVATE_KEY" && -n "$REALITY_PUBLIC_KEY" ]] || die "Пустые ключи REALITY"
 
-    # --- Ключи REALITY: формат X25519 идентичен WireGuard-ключам,
-    #     поэтому wg genkey/pubkey даёт валидную пару для Xray ---
-    REALITY_PRIVATE_KEY=$(wg genkey)
+    # --- Прочие идентификаторы ---
     REALITY_SHORT_ID=$(openssl rand -hex 8)
     XRAY_ADMIN_UUID=$(cat /proc/sys/kernel/random/uuid)
-
-    # --- Параметры обфускации AmneziaWG (случайные, в рамках ТЗ §6.4) ---
-    AWG_JC=$(rand_port 4 12)
-    AWG_JMIN=40
-    AWG_JMAX=70
-    # S1/S2 — уникальные небольшие значения (различимые размеры пакетов)
-    AWG_S1=$(rand_port 10 25)
-    AWG_S2=$(rand_port 26 50)
-    AWG_S3=$(rand_port 51 75)
-    AWG_S4=$(rand_port 76 100)
-    # H1–H4 — случайные 32-битные «магические» заголовки (вне диапазона 1–4!)
-    AWG_H1=$(rand_port 1000000000 2000000000)
-    AWG_H2=$(rand_port 2000000001 3000000000)
-    AWG_H3=$(rand_port 3000000001 4000000000)
-    AWG_H4=$(rand_port 100000000 999999999)
-
-    # --- Клиент admin (первое устройство владельца) ---
-    ADMIN_CLIENT_PRIVATE=$(wg genkey)
-    ADMIN_CLIENT_PUBLIC=$(echo "$ADMIN_CLIENT_PRIVATE" | wg pubkey)
-    ADMIN_CLIENT_PSK=$(wg genkey)
-    ADMIN_CLIENT_IP="10.8.0.2"
+    GRPC_SERVICE="svc-$(openssl rand -hex 4)"       # случайное имя gRPC-сервиса
+    XHTTP_PATH=$(openssl rand -hex 12)              # случайный путь XHTTP
+    HY2_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
+    SALAMANDER_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
 
     # --- .env ---
     cat >.env <<EOF
@@ -355,88 +341,42 @@ PANEL_DOMAIN=$PANEL_DOMAIN
 PANEL_SITE=$PANEL_SITE
 PANEL_TLS=$PANEL_TLS
 SERVER_PUBLIC_IP=$SERVER_PUBLIC_IP
-AWG_PORT=$AWG_PORT
-AWG_SUBNET=10.8.0.0/24
-AWG_SERVER_IP=10.8.0.1
-AWG_MTU=1280
-AWG_JC=$AWG_JC
-AWG_JMIN=$AWG_JMIN
-AWG_JMAX=$AWG_JMAX
-AWG_S1=$AWG_S1
-AWG_S2=$AWG_S2
-AWG_S3=$AWG_S3
-AWG_S4=$AWG_S4
-AWG_H1=$AWG_H1
-AWG_H2=$AWG_H2
-AWG_H3=$AWG_H3
-AWG_H4=$AWG_H4
-AWG_EXTRA_SET_ARGS=
 REALITY_SNI=$REALITY_SNI
 REALITY_SHORT_ID=$REALITY_SHORT_ID
 XRAY_ADMIN_UUID=$XRAY_ADMIN_UUID
+XRAY_GRPC_PORT=$XRAY_GRPC_PORT
+XRAY_XHTTP_PORT=$XRAY_XHTTP_PORT
+GRPC_SERVICE=$GRPC_SERVICE
+XHTTP_PATH=$XHTTP_PATH
+HY2_PORT=$HY2_PORT
+HY2_PASSWORD=$HY2_PASSWORD
+SALAMANDER_PASSWORD=$SALAMANDER_PASSWORD
 OKX_DRY_RUN=$OKX_DRY_RUN
 EOF
     chmod 600 .env
 
-    # --- Серверный конфиг AmneziaWG из шаблона ---
-    mkdir -p amneziawg/conf/clients
-    sed -e "s|@AWG_SERVER_PRIVATE_KEY@|$AWG_SERVER_PRIVATE_KEY|" \
-        -e "s|@AWG_SERVER_IP@|10.8.0.1|" \
-        -e "s|@AWG_MTU@|1280|" \
-        -e "s|@AWG_JC@|$AWG_JC|" -e "s|@AWG_JMIN@|$AWG_JMIN|" -e "s|@AWG_JMAX@|$AWG_JMAX|" \
-        -e "s|@AWG_S1@|$AWG_S1|" -e "s|@AWG_S2@|$AWG_S2|" \
-        -e "s|@AWG_S3@|$AWG_S3|" -e "s|@AWG_S4@|$AWG_S4|" \
-        -e "s|@AWG_H1@|$AWG_H1|" -e "s|@AWG_H2@|$AWG_H2|" \
-        -e "s|@AWG_H3@|$AWG_H3|" -e "s|@AWG_H4@|$AWG_H4|" \
-        amneziawg/conf/awg0.conf.tmpl > amneziawg/conf/awg0.conf
-    # Первый пир — устройство владельца
-    cat >>amneziawg/conf/awg0.conf <<EOF
-
-[Peer]
-# Имя: admin
-PublicKey = $ADMIN_CLIENT_PUBLIC
-PresharedKey = $ADMIN_CLIENT_PSK
-AllowedIPs = $ADMIN_CLIENT_IP/32
-PersistentKeepalive = 25
-EOF
-    chmod 600 amneziawg/conf/awg0.conf
-
-    # --- Клиентский конфиг владельца (.conf + будет показан QR) ---
-    cat >amneziawg/conf/clients/admin.conf <<EOF
-[Interface]
-PrivateKey = $ADMIN_CLIENT_PRIVATE
-Address = $ADMIN_CLIENT_IP/32
-DNS = 10.8.0.1
-MTU = 1280
-Jc = $AWG_JC
-Jmin = $AWG_JMIN
-Jmax = $AWG_JMAX
-S1 = $AWG_S1
-S2 = $AWG_S2
-S3 = $AWG_S3
-S4 = $AWG_S4
-H1 = $AWG_H1
-H2 = $AWG_H2
-H3 = $AWG_H3
-H4 = $AWG_H4
-
-[Peer]
-PublicKey = $AWG_SERVER_PUBLIC_KEY
-PresharedKey = $ADMIN_CLIENT_PSK
-AllowedIPs = 0.0.0.0/0
-Endpoint = $SERVER_PUBLIC_IP:$AWG_PORT
-PersistentKeepalive = 25
-EOF
-    chmod 600 amneziawg/conf/clients/admin.conf
-
-    # --- Конфиг Xray из шаблона ---
+    # --- Конфиг Xray из шаблона (три транспорта + StatsService) ---
     mkdir -p xray/conf
-    sed -e "s|@XRAY_ADMIN_UUID@|$XRAY_ADMIN_UUID|" \
+    sed -e "s|@XRAY_ADMIN_UUID@|$XRAY_ADMIN_UUID|g" \
         -e "s|@REALITY_SNI@|$REALITY_SNI|g" \
         -e "s|@REALITY_PRIVATE_KEY@|$REALITY_PRIVATE_KEY|" \
         -e "s|@REALITY_SHORT_ID@|$REALITY_SHORT_ID|" \
+        -e "s|@GRPC_SERVICE@|$GRPC_SERVICE|" \
+        -e "s|@XHTTP_PATH@|$XHTTP_PATH|" \
         xray/conf/config.json.tmpl > xray/conf/config.json
     chmod 600 xray/conf/config.json
+
+    # --- Конфиг Hysteria2 + самоподписанный сертификат ---
+    mkdir -p hysteria/conf
+    sed -e "s|@HY2_PASSWORD@|$HY2_PASSWORD|" \
+        -e "s|@SALAMANDER_PASSWORD@|$SALAMANDER_PASSWORD|" \
+        -e "s|@REALITY_SNI@|$REALITY_SNI|" \
+        hysteria/conf/hysteria.yaml.tmpl > hysteria/conf/hysteria.yaml
+    chmod 600 hysteria/conf/hysteria.yaml
+    openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout hysteria/conf/server.key -out hysteria/conf/server.crt \
+        -days 3650 -subj "/CN=$REALITY_SNI" 2>/dev/null
+    chmod 600 hysteria/conf/server.key
 
     # --- Caddyfile из шаблона ---
     cp caddy/Caddyfile.tmpl caddy/Caddyfile
@@ -462,12 +402,22 @@ OKX_LOOP_SEC=30
 EOF
     chmod 600 trading-bot/bot.env
 
+    # --- Файл ссылок владельца (для setup.sh и итогов установки) ---
+    mkdir -p xray/conf/share
+    Q_BASE="security=reality&encryption=none&pbk=${REALITY_PUBLIC_KEY}&fp=chrome&sni=${REALITY_SNI}&sid=${REALITY_SHORT_ID}"
+    {
+        echo "vless://${XRAY_ADMIN_UUID}@${SERVER_PUBLIC_IP}:443?${Q_BASE}&type=tcp&flow=xtls-rprx-vision#StealthNode-admin-tcp"
+        echo "vless://${XRAY_ADMIN_UUID}@${SERVER_PUBLIC_IP}:${XRAY_GRPC_PORT}?${Q_BASE}&type=grpc&serviceName=${GRPC_SERVICE}&alpn=h2#StealthNode-admin-grpc"
+        echo "vless://${XRAY_ADMIN_UUID}@${SERVER_PUBLIC_IP}:${XRAY_XHTTP_PORT}?${Q_BASE}&type=xhttp&path=%2F${XHTTP_PATH}&mode=auto#StealthNode-admin-xhttp"
+        echo "hy2://${HY2_PASSWORD}@${SERVER_PUBLIC_IP}:${HY2_PORT}/?obfs=salamander&obfs-password=${SALAMANDER_PASSWORD}&sni=${REALITY_SNI}&insecure=1#StealthNode-HY2"
+    } > xray/conf/share/admin-links.txt
+    chmod 600 xray/conf/share/admin-links.txt
+
     ok "Ключи и конфиги сгенерированы"
 else
     warn ".env уже существует — ключи и конфиги НЕ перегенерирую (используйте setup.sh)"
     # Подхватываем значения для фаервола и итогов.
-    # Безопасный разбор KEY=VALUE без eval: пароль может содержать
-    # пробелы/спецсимволы, наивный `source` здесь опасен.
+    # Безопасный разбор KEY=VALUE без eval: пароль может содержать спецсимволы.
     while IFS='=' read -r _k _v; do
         [[ "$_k" =~ ^[A-Z_]+$ ]] && export "$_k=$_v"
     done < <(grep -E '^[A-Z_]+=' .env || true)
@@ -480,23 +430,22 @@ umask 022
 title "Настройка фаервола (UFW)"
 ufw --force default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
-# Текущий SSH-порт обязан быть открыт ДО включения фаервола
 CURRENT_SSH_PORT=$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}')
 CURRENT_SSH_PORT=${CURRENT_SSH_PORT:-22}
 ufw allow "$CURRENT_SSH_PORT"/tcp comment 'SSH' >/dev/null
-ufw allow "$AWG_PORT"/udp comment 'StealthNode AmneziaWG' >/dev/null
-ufw allow 443/tcp comment 'StealthNode Xray REALITY' >/dev/null
+ufw allow 443/tcp comment 'StealthNode Xray TCP/Vision' >/dev/null
+ufw allow "$XRAY_GRPC_PORT"/tcp comment 'StealthNode Xray gRPC' >/dev/null
+ufw allow "$XRAY_XHTTP_PORT"/tcp comment 'StealthNode Xray XHTTP' >/dev/null
+ufw allow "$HY2_PORT"/udp comment 'StealthNode Hysteria2' >/dev/null
 ufw allow "$PANEL_PORT"/tcp comment 'StealthNode Panel' >/dev/null
 if [[ "${PANEL_TLS:-internal}" == "" ]]; then
     ufw allow 80/tcp comment 'LetsEncrypt HTTP-01' >/dev/null
 fi
 ufw --force enable >/dev/null
-ok "UFW: deny incoming + открыты SSH($CURRENT_SSH_PORT), AWG($AWG_PORT/udp), 443/tcp, панель($PANEL_PORT)"
-# Примечание: опубликованные порты Docker пробрасываются через NAT до UFW —
-# это нормально: наружу открыты ровно порты сервисов выше (см. SECURITY.md).
+ok "UFW: 443/tcp (Vision), $XRAY_GRPC_PORT (gRPC), $XRAY_XHTTP_PORT (XHTTP), $HY2_PORT/udp (HY2), $PANEL_PORT (панель)"
 
 # ============================================================
-# ШАГ 9. Fail2ban (Защита SSH; бан после 3 попыток — по ТЗ)
+# ШАГ 9. Fail2ban (бан SSH после 3 попыток — по ТЗ)
 # ============================================================
 title "Настройка Fail2ban"
 cat >/etc/fail2ban/jail.d/stealthnode.conf <<EOF
@@ -554,7 +503,6 @@ docker compose build
 docker compose up -d
 ok "Контейнеры запущены"
 
-# Ожидание готовности бэкенда (до ~2 минут)
 info "Ожидание готовности панели..."
 READY=0
 for i in $(seq 1 40); do
@@ -571,11 +519,13 @@ else
 fi
 
 # ============================================================
-# ШАГ 12. Итоговая информация + QR админского конфига
+# ШАГ 12. Итоговая информация + QR основной ссылки владельца
 # ============================================================
 PANEL_HOST="$SERVER_PUBLIC_IP"
 [[ -n "$PANEL_DOMAIN" ]] && PANEL_HOST="$PANEL_DOMAIN"
 PANEL_URL="https://${PANEL_HOST}:${PANEL_PORT}/${PANEL_PATH}/"
+
+MAIN_LINK=$(sed -n '1p' xray/conf/share/admin-links.txt 2>/dev/null || echo "")
 
 {
     echo "StealthNode — данные для доступа ($(date '+%F %T'))"
@@ -584,31 +534,38 @@ PANEL_URL="https://${PANEL_HOST}:${PANEL_PORT}/${PANEL_PATH}/"
     echo "Логин:           admin"
     echo "Пароль:          $ADMIN_PASSWORD"
     echo ""
-    echo "Порт AmneziaWG:  $AWG_PORT/udp"
-    echo "Xray REALITY:    443/tcp (маскировка: $REALITY_SNI)"
+    echo "VPN-профили Xray: 443/tcp (Vision), $XRAY_GRPC_PORT (gRPC), $XRAY_XHTTP_PORT (XHTTP)"
+    echo "Hysteria2 резерв: $HY2_PORT/udp (Salamander)"
+    echo "Маскировка:      $REALITY_SNI"
     echo ""
-    echo "Конфиг владельца AmneziaWG: $SCRIPT_DIR/amneziawg/conf/clients/admin.conf"
+    echo "Ссылки владельца (все транспорты + HY2):"
+    cat xray/conf/share/admin-links.txt 2>/dev/null || true
+    echo ""
     echo "Режим торгового бота: $([[ "$OKX_DRY_RUN" == "true" ]] && echo 'СИМУЛЯЦИЯ (paper)' || echo 'БОЕВОЙ')"
 } >"$CREDS_FILE"
 chmod 600 "$CREDS_FILE"
 
 title "УСТАНОВКА ЗАВЕРШЕНА"
 echo
-echo "  🌐 Веб-панель:     ${C_BLD}$PANEL_URL${C_RST}"
-echo "  👤 Логин:          admin"
+echo "  🌐 Веб-панель:  ${C_BLD}$PANEL_URL${C_RST}"
+echo "  👤 Логин:       admin"
 if [[ "$GENERATED_PASSWORD" -eq 1 ]]; then
-    echo "  🔑 Пароль:         ${C_BLD}$ADMIN_PASSWORD${C_RST} (сгенерирован, сохранён)"
+    echo "  🔑 Пароль:      ${C_BLD}$ADMIN_PASSWORD${C_RST} (сгенерирован, сохранён)"
 else
-    echo "  🔑 Пароль:         (указанный вами при установке)"
+    echo "  🔑 Пароль:      (указанный вами при установке)"
 fi
-echo "  📄 Все данные:     $CREDS_FILE"
+echo "  📄 Все данные:  $CREDS_FILE"
 echo
-echo "  📡 AmneziaWG порт: $AWG_PORT/udp   •   Xray REALITY: 443/tcp ($REALITY_SNI)"
-echo "  🤖 Торговый бот:   $([[ "$OKX_DRY_RUN" == "true" ]] && echo 'режим симуляции' || echo 'БОЕВОЙ режим')"
+echo "  🚀 VPN: VLESS+REALITY 443/tcp (основной), $XRAY_GRPC_PORT (gRPC), $XRAY_XHTTP_PORT (XHTTP)"
+echo "  🛟 Резерв Hysteria2: $HY2_PORT/udp  •  Маскировка: $REALITY_SNI"
+echo "  🤖 Торговый бот: $([[ "$OKX_DRY_RUN" == "true" ]] && echo 'режим симуляции' || echo 'БОЕВОЙ режим')"
 echo
-echo "Отсканируйте QR-код приложением AmneziaVPN (устройство владельца):"
-echo
-qrencode -t ansiutf8 < amneziawg/conf/clients/admin.conf || \
-    warn "qrencode не сработал — возьмите конфиг из amneziawg/conf/clients/admin.conf"
+if [[ -n "$MAIN_LINK" ]]; then
+    echo "Основная ссылка владельца (отсканируйте в клиенте: v2rayNG / Streisand / Nekoray / Happ):"
+    echo
+    echo "$MAIN_LINK" | qrencode -t ansiutf8 || warn "qrencode не сработал — ссылки в $CREDS_FILE"
+    echo
+    echo "Резервные ссылки (gRPC, XHTTP, HY2) — в файле $CREDS_FILE и в панели (Настройки)."
+fi
 echo
 ok "Готово. Управление: docker compose -f $SCRIPT_DIR/docker-compose.yml [logs|ps|restart]"

@@ -1,30 +1,32 @@
 # ============================================================
-# StealthNode — монитор трафика.
-# Хранит «кумулятивные» счётчики на устройство:
-#   счётчики `awg show` обнуляются при пересоздании интерфейса,
-#   поэтому ведём офсеты и склеиваем непрерывный ряд.
+# StealthNode — монитор трафика пользователей Xray.
+# Встроенная статистика Xray обнуляется при перезапуске контейнера,
+# поэтому ведём офсеты и склеиваем непрерывный кумулятивный ряд.
 # Фоновая задача раз в 60 секунд пишет снапшоты в БД
 # (из них считаются суммы за день/неделю/месяц и квоты гостей).
+# Также трекаем «последнюю активность» — признак online для панели.
 # ============================================================
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 
 from ..database import SessionLocal
 from ..models import Device, Setting, TrafficSnapshot
-from . import wg_manager
+from . import xray_manager
 
 log = logging.getLogger("stealthnode.traffic")
 
-_KEY_OFFSETS = "traffic_offsets"   # Setting: {pubkey: {"rx": int, "tx": int}}
-_KEY_LAST = "traffic_last_seen"    # Setting: {pubkey: {"rx": int, "tx": int}} сырые значения
+_KEY_OFFSETS = "traffic_offsets"   # Setting: {email: {"rx": int, "tx": int}}
+_KEY_LAST = "traffic_last_seen"    # Setting: {email: {"rx": int, "tx": int}} сырые значения
 
 
 class TrafficMonitor:
     def __init__(self) -> None:
         self.offsets: dict[str, dict[str, int]] = {}
         self.last_raw: dict[str, dict[str, int]] = {}
+        self.last_change: dict[str, float] = {}   # email -> время последнего роста трафика
         self._loaded = False
 
     # ---------- загрузка/сохранение состояния в БД ----------
@@ -53,29 +55,35 @@ class TrafficMonitor:
             db.close()
 
     # ---------- основной расчёт ----------
-    def cumulative(self, peers: list[dict] | None = None) -> dict[str, dict[str, int]]:
+    def cumulative(self, raw: dict[str, dict[str, int]] | None = None) -> dict[str, dict[str, int]]:
         """
-        Текущие кумулятивные счётчики: {pubkey: {"rx": .., "tx": ..}}.
-        Обнаруживает обнуление интерфейса: если новое значение меньше
-        предыдущего — переносим старое в офсет.
-        peers можно передать извне, чтобы не дёргать `awg dump` дважды.
+        Кумулятивные счётчики: {email: {"rx": .., "tx": ..}}.
+        rx = uplink (загрузка КЛИЕНТА), tx = downlink (скачивание клиента).
+        Обнаруживает обнуление Xray: переносит прежний хвост в офсет.
         """
         self._load()
-        if peers is None:
-            peers = wg_manager.dump()
+        if raw is None:
+            raw = xray_manager.user_traffic()
         result: dict[str, dict[str, int]] = {}
-        for peer in peers:
-            pub = peer["public_key"]
-            raw_rx, raw_tx = peer["rx"], peer["tx"]
-            last = self.last_raw.get(pub, {"rx": 0, "tx": 0})
-            off = self.offsets.setdefault(pub, {"rx": 0, "tx": 0})
+        for email, counters in raw.items():
+            raw_rx = counters.get("uplink", 0)
+            raw_tx = counters.get("downlink", 0)
+            last = self.last_raw.get(email, {"rx": 0, "tx": 0})
+            off = self.offsets.setdefault(email, {"rx": 0, "tx": 0})
             if raw_rx < last["rx"]:
-                off["rx"] += last["rx"]  # интерфейс пересоздан: счётчик обнулился
+                off["rx"] += last["rx"]  # счётчики Xray обнулились (рестарт)
             if raw_tx < last["tx"]:
                 off["tx"] += last["tx"]
-            self.last_raw[pub] = {"rx": raw_rx, "tx": raw_tx}
-            result[pub] = {"rx": raw_rx + off["rx"], "tx": raw_tx + off["tx"]}
+            if raw_rx > last["rx"] or raw_tx > last["tx"]:
+                self.last_change[email] = time.monotonic()
+            self.last_raw[email] = {"rx": raw_rx, "tx": raw_tx}
+            result[email] = {"rx": raw_rx + off["rx"], "tx": raw_tx + off["tx"]}
         return result
+
+    def is_online(self, email: str, window_sec: float = 120.0) -> bool:
+        """online = трафик по пользователю рос в последние N секунд."""
+        ts = self.last_change.get(email)
+        return ts is not None and (time.monotonic() - ts) < window_sec
 
 
 monitor = TrafficMonitor()
@@ -89,13 +97,10 @@ async def snapshot_loop(period_sec: int = 60) -> None:
             monitor._save()
             db = SessionLocal()
             try:
-                devices = {
-                    d.public_key: d.id
-                    for d in db.query(Device).filter(Device.kind == "awg").all()
-                }
+                devices = {d.name: d.id for d in db.query(Device).all()}
                 now = datetime.utcnow()
-                for pub, counters in cum.items():
-                    dev_id = devices.get(pub)
+                for email, counters in cum.items():
+                    dev_id = devices.get(email)
                     if dev_id is None:
                         continue
                     db.add(TrafficSnapshot(

@@ -70,14 +70,17 @@ case "$CHOICE" in
     echo
     echo "  Веб-панель:  https://${PANEL_HOST}:${PANEL_PORT}/${PANEL_PATH}/"
     echo "  Логин:       admin"
-    echo "  AWG порт:    ${AWG_PORT}/udp   •   REALITY: 443/tcp ($REALITY_SNI)"
+    echo "  Профили:     443/tcp (Vision), ${XRAY_GRPC_PORT} (gRPC), ${XRAY_XHTTP_PORT} (XHTTP)"
+    echo "  Резерв HY2:  ${HY2_PORT}/udp   •   Маскировка: ${REALITY_SNI}"
     echo
-    if [[ -f amneziawg/conf/clients/admin.conf ]]; then
-        echo "QR конфига владельца (AmneziaVPN):"
-        qrencode -t ansiutf8 < amneziawg/conf/clients/admin.conf || \
-            warn "Конфиг в amneziawg/conf/clients/admin.conf"
+    if [[ -f xray/conf/share/admin-links.txt ]]; then
+        echo "Основная ссылка владельца (TCP/Vision), QR:"
+        sed -n '1p' xray/conf/share/admin-links.txt | qrencode -t ansiutf8 || true
+        echo
+        echo "Все ссылки (TCP/gRPC/XHTTP/HY2):"
+        cat xray/conf/share/admin-links.txt
     else
-        warn "amneziawg/conf/clients/admin.conf не найден — создайте устройство в панели"
+        warn "xray/conf/share/admin-links.txt не найден — ссылки есть в панели (Настройки)"
     fi
     ;;
 

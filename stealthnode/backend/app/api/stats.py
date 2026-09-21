@@ -12,7 +12,7 @@ from ..config import settings
 from ..database import get_db
 from ..deps import get_current_admin
 from ..models import AdminUser, Device
-from ..services import docker_client, wg_manager
+from ..services import docker_client, xray_manager
 from ..services.traffic_monitor import monitor, traffic_in_window
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -49,24 +49,17 @@ def services(admin: AdminUser = Depends(get_current_admin)):
 @router.get("/peers")
 def peers(admin: AdminUser = Depends(get_current_admin),
           db: Session = Depends(get_db)):
-    """Онлайн-устройства: IP в туннеле, endpoint, скорость (по последнему замеру)."""
-    devices = {d.public_key: d for d in db.query(Device).filter(Device.kind == "awg").all()}
-    peers_raw = wg_manager.dump()
-    cum = monitor.cumulative(peers_raw)
+    """Пользователи VPN: накопленный трафик и признак активности."""
+    devices = {d.name: d for d in db.query(Device).all()}
+    cum = monitor.cumulative(xray_manager.user_traffic())
     out = []
-    now_ts = datetime.utcnow().timestamp()
-    for peer in peers_raw:
-        dev = devices.get(peer["public_key"])
-        online = peer["latest_handshake"] > 0 and (now_ts - peer["latest_handshake"]) < 180
-        c = cum.get(peer["public_key"], {"rx": 0, "tx": 0})
+    for email, counters in cum.items():
+        dev = devices.get(email)
         out.append({
             "device_id": dev.id if dev else None,
-            "name": dev.name if dev else peer["public_key"][:10] + "…",
-            "tunnel_ip": dev.tunnel_ip if dev else "",
-            "endpoint": peer["endpoint"],
-            "online": online,
-            "latest_handshake": peer["latest_handshake"],
-            "cum_rx": c["rx"], "cum_tx": c["tx"],
+            "name": email,
+            "online": monitor.is_online(email),
+            "cum_rx": counters["rx"], "cum_tx": counters["tx"],
         })
     return out
 
@@ -84,7 +77,7 @@ def traffic(period: str = "day", admin: AdminUser = Depends(get_current_admin),
     }
     since = since_map.get(period, since_map["day"])
     rows, tot_rx, tot_tx = [], 0, 0
-    for dev in db.query(Device).filter(Device.kind == "awg").all():
+    for dev in db.query(Device).all():
         rx, tx = traffic_in_window(dev.id, since, db)
         rows.append({"device_id": dev.id, "name": dev.name, "rx": rx, "tx": tx, "total": rx + tx})
         tot_rx, tot_tx = tot_rx + rx, tot_tx + tx

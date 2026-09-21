@@ -1,24 +1,50 @@
 {
   // ============================================================
-  // StealthNode — Xray VLESS + REALITY (шаблон).
+  // StealthNode — Xray VLESS + REALITY, три транспорта (ТСПУ-2026).
+  //   1) TCP :443, flow vision  — основной профиль;
+  //   2) gRPC + REALITY         — резерв №1 (после детекта vision в мае 2026);
+  //   3) XHTTP + REALITY        — резерв №2.
+  // Пользователи ОДИНАКОВЫ во всех трёх инбаундах (email = имя устройства) —
+  // клиент выбирает рабочий транспорт. Учёт трафика — встроенной
+  // статистикой Xray (StatsService), которую опрашивает панель.
   // install.sh подставляет @ПЛЕЙСХОЛДЕРЫ@.
-  // Клиенты управляются веб-панелью (перезапись clients + restart).
   // ============================================================
-  "log": {
-    "loglevel": "warning"
+  "log": { "loglevel": "warning" },
+
+  // --- Встроенная статистика: per-user счётчики трафика для квот/графиков ---
+  "stats": {},
+  "api": {
+    "tag": "api",
+    "services": ["StatsService"]
   },
+  "policy": {
+    "levels": {
+      "0": { "statsUserUplink": true, "statsUserDownlink": true }
+    },
+    "system": {
+      "statsInboundUplink": true,
+      "statsInboundDownlink": true
+    }
+  },
+
   "inbounds": [
+    // ---------- Канал управления StatsService (только localhost контейнера) ----------
+    {
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "dokodemo-door",
+      "settings": { "address": "127.0.0.1" },
+      "tag": "api"
+    },
+    // ---------- Профиль 1: VLESS + TCP + REALITY (vision) ----------
     {
       "listen": "0.0.0.0",
       "port": 443,
       "protocol": "vless",
+      "tag": "tcp",
       "settings": {
         "clients": [
-          {
-            "id": "@XRAY_ADMIN_UUID@",
-            "flow": "xtls-rprx-vision",
-            "email": "admin"
-          }
+          { "id": "@XRAY_ADMIN_UUID@", "flow": "xtls-rprx-vision", "email": "admin" }
         ],
         "decryption": "none"
       },
@@ -34,19 +60,74 @@
           "shortIds": ["@REALITY_SHORT_ID@", ""]
         }
       },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
-      }
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+    },
+    // ---------- Профиль 2: VLESS + gRPC + REALITY ----------
+    {
+      "listen": "0.0.0.0",
+      "port": 44301,
+      "protocol": "vless",
+      "tag": "grpc",
+      "settings": {
+        "clients": [
+          // На gRPC flow НЕ указывается (vision работает только поверх TCP)
+          { "id": "@XRAY_ADMIN_UUID@", "email": "admin" }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "reality",
+        "grpcSettings": { "serviceName": "@GRPC_SERVICE@" },
+        "realitySettings": {
+          "show": false,
+          "dest": "@REALITY_SNI@:443",
+          "xver": 0,
+          "serverNames": ["@REALITY_SNI@"],
+          "privateKey": "@REALITY_PRIVATE_KEY@",
+          "shortIds": ["@REALITY_SHORT_ID@", ""]
+        }
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+    },
+    // ---------- Профиль 3: VLESS + XHTTP + REALITY ----------
+    {
+      "listen": "0.0.0.0",
+      "port": 44302,
+      "protocol": "vless",
+      "tag": "xhttp",
+      "settings": {
+        "clients": [
+          { "id": "@XRAY_ADMIN_UUID@", "email": "admin" }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "reality",
+        "xhttpSettings": { "path": "/@XHTTP_PATH@", "mode": "auto" },
+        "realitySettings": {
+          "show": false,
+          "dest": "@REALITY_SNI@:443",
+          "xver": 0,
+          "serverNames": ["@REALITY_SNI@"],
+          "privateKey": "@REALITY_PRIVATE_KEY@",
+          "shortIds": ["@REALITY_SHORT_ID@", ""]
+        }
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
     }
   ],
+
   "outbounds": [
     { "protocol": "freedom", "tag": "direct" },
     { "protocol": "blackhole", "tag": "block" }
   ],
+
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
+      { "type": "field", "inboundTag": ["api"], "outboundTag": "api" },
       { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" }
     ]
   }
