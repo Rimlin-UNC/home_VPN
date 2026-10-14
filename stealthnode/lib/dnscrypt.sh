@@ -5,10 +5,24 @@
 # shellcheck shell=bash
 
 setup_dnscrypt() {
-    local cfg=/etc/dnscrypt-proxy/dnscrypt-proxy.toml
-    if write_if_changed "${cfg}" 644 < "${SN_SRC}/templates/dnscrypt-proxy.toml"; then
-        info "конфигурация dnscrypt-proxy обновлена"
+    local cfg=/etc/dnscrypt-proxy/dnscrypt-proxy.toml orig=/etc/dnscrypt-proxy/dnscrypt-proxy.toml.stealthnode-orig
+    info "dnscrypt-proxy: $(dnscrypt-proxy -version 2> /dev/null || echo 'версия неизвестна')"
+    [[ -f ${orig} || ! -f ${cfg} ]] || cp -p "${cfg}" "${orig}"
+    # Наш конфиг проверяется самим dnscrypt-proxy (-check); если версия пакета его не понимает,
+    # оставляем конфиг из пакета (Cloudflare DoH) — он тоже шифрует DNS.
+    if dnscrypt-proxy -check -config "${SN_SRC}/templates/dnscrypt-proxy.toml" > /tmp/dnscrypt-check.log 2>&1; then
+        if write_if_changed "${cfg}" 644 < "${SN_SRC}/templates/dnscrypt-proxy.toml"; then
+            info "конфигурация dnscrypt-proxy обновлена"
+        fi
+    else
+        warn "конфиг StealthNode не подходит этой версии dnscrypt-proxy: $(tail -n 2 /tmp/dnscrypt-check.log | tr '\n' ' ')"
+        if [[ -f ${orig} ]]; then
+            cp -p "${orig}" "${cfg}"
+        fi
+        warn "используется конфигурация из пакета"
     fi
+    rm -f /tmp/dnscrypt-check.log
+    systemctl reset-failed dnscrypt-proxy.socket dnscrypt-proxy.service > /dev/null 2>&1 || true
     systemctl enable dnscrypt-proxy.socket > /dev/null 2>&1 || true
     systemctl restart dnscrypt-proxy.socket 2> /dev/null || true
     systemctl restart dnscrypt-proxy 2> /dev/null || true

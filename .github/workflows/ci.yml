@@ -106,6 +106,8 @@ jobs:
             sudo systemctl --no-pager status x-ui caddy fail2ban dnscrypt-proxy.socket
             sudo journalctl -u x-ui --no-pager -n 80
             sudo journalctl -u caddy --no-pager -n 40
+            sudo journalctl -u dnscrypt-proxy -u dnscrypt-proxy.socket --no-pager -n 40
+            dnscrypt-proxy -version
             sudo tail -n 60 /var/log/x-ui/3xui.log
             sudo cat /etc/caddy/Caddyfile
             sudo ss -lntup
