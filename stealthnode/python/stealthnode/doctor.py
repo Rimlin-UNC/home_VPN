@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, links, users
+from . import config, links, panelauth, users
 from .config import Settings
 from .util import Console, human_bytes, run, which
 from .xui import XuiClient, XuiError
@@ -193,8 +193,18 @@ def check_fail2ban(r: Report) -> None:
     if code != 0:
         r.add(FAIL, "fail2ban-client status", out.strip()[:200])
         return
-    for jail, title in (("sshd", "SSH: 3 попытки → бан 24 ч"), ("stealthnode-panel", "перебор пароля панели"), ("3x-ipl", "лимит IP 3x-ui")):
-        r.add(OK if jail in out else (WARN if jail == "3x-ipl" else FAIL), f"jail {jail}", title)
+    jails = (
+        ("sshd", "SSH: 3 попытки → бан 24 ч"),
+        (panelauth.PANEL_JAIL, "панель: 10 неверных паролей за час → бан 1 ч"),
+        ("3x-ipl", "лимит IP 3x-ui"),
+    )
+    for jail, title in jails:
+        if jail not in out:
+            r.add(WARN if jail == "3x-ipl" else FAIL, f"jail {jail}", title)
+            continue
+        banned = panelauth.banned_ips(jail) if jail != "3x-ipl" else None
+        extra = f"; в бане сейчас: {len(banned)} (stealthnode unban)" if banned else ""
+        r.add(OK, f"jail {jail}", title + extra)
 
 
 def _mode(path: Path) -> int | None:
@@ -276,6 +286,19 @@ def check_panel(r: Report, s: Settings) -> None:
         r.add(OK if status == 404 else WARN, "корень сайта не раскрывает панель", f"HTTP {status}")
     except OSError as exc:
         r.add(WARN, "проверка корня сайта", str(exc))
+    check_panel_login(r, s)
+
+
+def check_panel_login(r: Report, s: Settings) -> None:
+    """Логин/пароль панели: сверка .env с хешем в БД (без попытки входа — лимиты не задеваются)."""
+    state, admin = panelauth.current_state(s)
+    status = {panelauth.MATCH: OK, panelauth.CHANGED: OK, panelauth.UNKNOWN: WARN}.get(state, FAIL)
+    detail = panelauth.STATE_TEXT[state]
+    if state in (panelauth.DEFAULT, panelauth.MISSING):
+        detail += " — выполните: stealthnode panel-password"
+    if admin and admin.two_factor:
+        detail += "; 2FA включена"
+    r.add(status, "вход в панель", detail)
 
 
 def check_subscription(r: Report, s: Settings, xui: XuiClient) -> list[str]:

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import socket
@@ -60,6 +61,10 @@ REALITY_CAPABLE_FINGERPRINTS = {"firefox", "chrome", "safari"}
 
 RESERVED_PORTS = {22, 53, 80, 443, 2019, 2096, 8443, 11111, 62789}
 
+# Пароль панели: сгенерированный — 24 символа; свой (stealthnode panel-password) — от 8.
+PANEL_PASSWORD_MIN = 8
+PANEL_PASSWORD_RECOMMENDED = 12
+
 TAG_XHTTP = "sn-vless-xhttp"
 TAG_VISION = "sn-vless-vision"
 TAG_HY2 = "sn-hysteria2"
@@ -73,6 +78,11 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def is_valid_domain(value: str) -> bool:
     return bool(_DOMAIN_RE.match(value or ""))
+
+
+def admin_ips(value: str) -> list[str]:
+    """``SN_ADMIN_IP``: IP/подсети владельца через пробел или запятую (не банятся fail2ban)."""
+    return [item for item in re.split(r"[\s,]+", value or "") if item]
 
 
 def port_is_free(port: int, proto: str = "tcp") -> bool:
@@ -128,6 +138,7 @@ ENV_ORDER = [
     "SN_SUB_PORT",
     "SN_SUB_PATH",
     "SN_SSH_PORT",
+    "SN_ADMIN_IP",
     "SN_FREEDOM_STRATEGY",
     "SN_TIMEZONE",
     "SN_DEFAULT_LIMIT_GB",
@@ -197,8 +208,13 @@ class Settings:
             errors.append("SN_REALITY_SHORT_ID: ожидается 2-16 hex-символов")
         if len(self.get("SN_HY2_OBFS_PASSWORD")) < 16:
             errors.append("SN_HY2_OBFS_PASSWORD: минимум 16 символов")
-        if len(self.get("SN_XUI_PASSWORD")) < 16:
-            errors.append("SN_XUI_PASSWORD: минимум 16 символов")
+        if len(self.get("SN_XUI_PASSWORD")) < PANEL_PASSWORD_MIN:
+            errors.append(f"SN_XUI_PASSWORD: минимум {PANEL_PASSWORD_MIN} символов")
+        for item in admin_ips(self.get("SN_ADMIN_IP")):
+            try:
+                ipaddress.ip_network(item, strict=False)
+            except ValueError:
+                errors.append(f"SN_ADMIN_IP: некорректный IP или подсеть {item!r}")
         if self.get("SN_TLS_MODE") not in ("acme", "internal"):
             errors.append("SN_TLS_MODE: допустимо acme или internal")
         if self.get("SN_FINGERPRINT") not in REALITY_CAPABLE_FINGERPRINTS:
@@ -221,6 +237,8 @@ class Settings:
 
     def warnings(self) -> list[str]:
         warns = []
+        if PANEL_PASSWORD_MIN <= len(self.get("SN_XUI_PASSWORD")) < PANEL_PASSWORD_RECOMMENDED:
+            warns.append(f"пароль панели короче {PANEL_PASSWORD_RECOMMENDED} символов — лучше длиннее")
         if self.get("SN_FINGERPRINT") not in SAFE_FINGERPRINTS:
             warns.append(
                 f"отпечаток {self.get('SN_FINGERPRINT')!r}: при >3 параллельных TLS-сессиях к одному SNI "

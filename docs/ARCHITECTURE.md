@@ -45,6 +45,7 @@
 | Данные | Где | Кто меняет |
 |---|---|---|
 | Параметры, ключи REALITY, пароли, порты | `/opt/stealthnode/.env` (600) | `install.sh`, `stealthnode env/sni-set` |
+| Логин/пароль панели (действующий) | БД 3x-ui `/etc/x-ui/x-ui.db` (bcrypt); в `.env` — исходный или заданный `stealthnode panel-password` | веб-интерфейс панели, `stealthnode panel-password`; `install.sh` задаёт только чистой панели |
 | Инбаунды, пользователи, трафик | БД 3x-ui `/etc/x-ui/x-ui.db` | `stealthnode provision/user`, панель |
 | Конфиг Xray | генерирует 3x-ui из БД; копия для справки — `/opt/stealthnode/xray/config.json` | — |
 | Ссылки и QR | `/opt/stealthnode/users/<имя>/`, `xray/share/admin-links.txt` | `stealthnode links` |

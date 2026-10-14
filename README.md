@@ -50,6 +50,8 @@ sudo stealthnode user show sister --qr # ссылки и QR-код в терми
 sudo stealthnode user list             # трафик и лимиты
 sudo stealthnode backup                # резервная копия (ещё и ежедневно по таймеру)
 sudo stealthnode sni-check             # подобрать SNI для REALITY с этого сервера
+sudo stealthnode panel-password        # сменить/восстановить пароль панели, снять блокировки входа
+sudo stealthnode unban                 # баны fail2ban (снять: unban <IP>)
 ```
 
 Все команды: [docs/OPERATIONS.md](docs/OPERATIONS.md).

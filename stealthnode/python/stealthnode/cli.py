@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -17,10 +18,15 @@ import subprocess
 import sys
 import time
 
-from . import __version__, backup, config, doctor, provision, users
+from . import __version__, backup, config, doctor, panelauth, provision, users
 from .config import Settings
-from .util import Console, atomic_write
+from .panelauth import PanelAuthError
+from .util import Console, atomic_write, rand_str
 from .xui import XuiError
+
+# Логин/пароль панели меняются только вместе с панелью (stealthnode panel-password),
+# иначе .env и учётные данные разойдутся с настоящим паролем.
+PANEL_CRED_KEYS = ("SN_XUI_USERNAME", "SN_XUI_PASSWORD")
 
 
 def _settings_or_die(console: Console) -> Settings:
@@ -87,6 +93,9 @@ def cmd_env(args, console: Console) -> int:
             if not sep or not re.match(r"^SN_[A-Z0-9_]+$", key):
                 console.fail(f"ожидается SN_KEY=VALUE, получено {item!r}")
                 return 2
+            if key in PANEL_CRED_KEYS:
+                console.fail(f"{key} в .env не меняет пароль панели — используйте: stealthnode panel-password")
+                return 2
             current[key] = value
         config.save_settings(Settings(current))
         return 0
@@ -119,18 +128,51 @@ def cmd_provision(args, console: Console) -> int:
     return 0
 
 
+def panel_login_view(s: Settings) -> tuple[str, str, str]:
+    """(логин, пароль, пояснение) для показа владельцу — с учётом смены пароля в веб-интерфейсе."""
+    state, admin = panelauth.current_state(s)
+    login, password, note = s.get("SN_XUI_USERNAME"), s.get("SN_XUI_PASSWORD"), ""
+    if state == panelauth.CHANGED:
+        login = admin.username if admin else login
+        password = "изменён в веб-интерфейсе панели (StealthNode его не хранит)"
+        note = "Забыли новый пароль: sudo stealthnode panel-password"
+    elif state == panelauth.DEFAULT:
+        login, password = "admin", "admin"
+        note = "НЕБЕЗОПАСНО: стандартный пароль — выполните sudo stealthnode panel-password"
+    elif state == panelauth.MISSING:
+        note = "В панели нет администратора — выполните sudo stealthnode panel-password"
+    elif state == panelauth.UNKNOWN:
+        note = "Если меняли пароль в веб-интерфейсе — действует новый"
+    if admin and admin.two_factor:
+        note = (note + "; " if note else "") + "включена 2FA: нужен код из приложения"
+    return login, password, note
+
+
 def write_credentials(s: Settings, xui, console: Console | None = None) -> None:
     owner = s.get("SN_OWNER_NAME") or "owner"
-    client = users.find_user(xui, owner) if xui else None
-    sub = users.sub_url(s, client) if client else "(нет владельца)"
+    client = None
+    if xui:
+        try:
+            client = users.find_user(xui, owner)
+        except XuiError:
+            client = None
+    sub = users.sub_url(s, client) if client else "(нет владельца или панель недоступна: stealthnode credentials)"
+    login, password, note = panel_login_view(s)
+    note_line = f"{note}\n" if note else ""
     text = f"""StealthNode {__version__} — учётные данные (СЕКРЕТНО, права 600)
 Обновлено: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}
 
 == Панель 3X-UI ==
 Адрес:   {s.panel_url}
-Логин:   {s.get('SN_XUI_USERNAME')}
-Пароль:  {s.get('SN_XUI_PASSWORD')}
-(язык интерфейса: выберите «Русский» на странице входа; включите 2FA в настройках)
+Логин:   {login}
+Пароль:  {password}
+{note_line}(язык интерфейса: выберите «Русский» на странице входа; включите 2FA в настройках)
+
+== Не пускает в панель / забыли пароль ==
+sudo stealthnode panel-password   новый пароль + снятие блокировок (лимит 3x-ui и fail2ban)
+После {panelauth.LIMITER_FAILURES} неверных попыток за {panelauth.LIMITER_WINDOW_MIN} минут 3x-ui на \
+{panelauth.LIMITER_COOLDOWN_MIN} минут блокирует вход
+и отвечает «неверный логин или пароль» даже на правильный — подождите или выполните команду выше.
 
 == Подписка владельца ({owner}) ==
 {sub}
@@ -176,7 +218,10 @@ def cmd_info(args, console: Console) -> int:
     console.line(f"REALITY:    SNI {s.get('SN_REALITY_SNI')}, fp {s.get('SN_FINGERPRINT')}")
     console.line(f"Сертификат Hysteria2: {s.get('SN_HY2_CERT_MODE')}")
     if args.secrets:
-        console.line(f"Логин/пароль панели: {s.get('SN_XUI_USERNAME')} / {s.get('SN_XUI_PASSWORD')}")
+        login, password, note = panel_login_view(s)
+        console.line(f"Логин/пароль панели: {login} / {password}")
+        if note:
+            console.line(f"            {note}")
     else:
         console.line(f"Учётные данные: {config.credentials_path()} (или stealthnode info --secrets)")
     try:
@@ -383,6 +428,127 @@ def cmd_token(args, console: Console) -> int:
     return 0
 
 
+def _ask_password(console: Console) -> str:
+    """Спросить новый пароль дважды; пустой ввод — сгенерировать случайный."""
+    first = getpass.getpass("Новый пароль панели (Enter — сгенерировать случайный): ")
+    if not first:
+        return ""
+    if getpass.getpass("Повторите пароль: ") != first:
+        raise ValueError("пароли не совпадают — ничего не изменено")
+    return first
+
+
+def _restart_panel(s: Settings, console: Console) -> bool:
+    """Перезапуск x-ui: обнуляет встроенный лимит неудачных входов (он хранится в памяти)."""
+    proc = subprocess.run(["systemctl", "restart", "x-ui"], capture_output=True, text=True, timeout=120, check=False)
+    if proc.returncode != 0:
+        console.warn("systemctl restart x-ui: " + (proc.stdout + proc.stderr).strip()[-300:])
+        return False
+    try:
+        provision.wait_for_api(_client(s), timeout=90)
+    except XuiError as exc:
+        console.warn(f"панель после перезапуска пока не отвечает: {exc}")
+        return False
+    doctor.wait_xray_process(timeout=30)
+    return True
+
+
+def cmd_panel_password(args, console: Console) -> int:
+    """Сменить или восстановить логин/пароль панели 3x-ui и снять блокировки входа."""
+    s = _settings_or_die(console)
+    state, admin = panelauth.current_state(s)
+    if args.state:  # для install.sh: одно слово
+        print(state)
+        return 0
+    if args.check:
+        console.line(f"Панель:  {s.panel_url}")
+        console.line(f"Логин в панели: {admin.username if admin and admin.username else '?'}")
+        (console.ok if state in (panelauth.MATCH, panelauth.CHANGED) else console.warn)(panelauth.STATE_TEXT[state])
+        if admin and admin.two_factor:
+            console.info("включена 2FA: при входе нужен код из приложения")
+        if panelauth.f2b_available():
+            banned = panelauth.banned_ips(panelauth.PANEL_JAIL)
+            if banned:
+                console.warn(f"fail2ban: в бане панели {len(banned)} IP: {' '.join(banned)} (снять: stealthnode unban <IP>)")
+        return {panelauth.MATCH: 0, panelauth.CHANGED: 0, panelauth.UNKNOWN: 3}.get(state, 1)
+
+    username = args.username or (admin.username if admin and admin.username else s.get("SN_XUI_USERNAME"))
+    panelauth.validate_username(username)
+    generated = False
+    if args.password is not None:
+        password = args.password
+    elif args.random or not sys.stdin.isatty():
+        password = ""
+    else:
+        password = _ask_password(console)
+    if not password:
+        password, generated = rand_str(24), True
+    panelauth.validate_password(password)
+
+    panelauth.set_admin(username, password, reset_2fa=args.reset_2fa)
+    s.values["SN_XUI_USERNAME"], s.values["SN_XUI_PASSWORD"] = username, password
+    config.save_settings(s)
+    console.ok("логин/пароль панели изменены; открытые сессии панели завершены")
+    console.line(f"       Адрес:  {s.panel_url}")
+    console.line(f"       Логин:  {username}")
+    if generated:
+        console.line(f"       Пароль: {password}")
+    if args.reset_2fa:
+        console.ok("двухфакторная аутентификация (2FA) отключена")
+    elif admin and admin.two_factor:
+        console.info("в панели включена 2FA: код из приложения по-прежнему нужен (потеряли — добавьте --reset-2fa)")
+
+    if args.no_restart:
+        console.info(
+            f"панель не перезапускалась: если недавно было {panelauth.LIMITER_FAILURES}+ неверных попыток, "
+            f"вход может быть заблокирован ещё до {panelauth.LIMITER_COOLDOWN_MIN} минут"
+        )
+    elif _restart_panel(s, console):
+        console.ok("панель перезапущена: лимит неудачных входов 3x-ui сброшен (VPN переподключился за секунды)")
+    try:
+        unbanned = panelauth.unban_panel_lockouts()
+    except PanelAuthError as exc:
+        console.warn(str(exc))
+        unbanned = []
+    if unbanned:
+        console.ok(f"fail2ban: сняты баны входа в панель: {' '.join(unbanned)}")
+    try:
+        xui = _client(s)
+    except XuiError:
+        xui = None
+    write_credentials(s, xui, console)
+    return 0
+
+
+def cmd_unban(args, console: Console) -> int:
+    """Показать или снять баны fail2ban (SSH, панель, recidive, лимит IP 3x-ui)."""
+    if not panelauth.f2b_available():
+        console.fail("fail2ban не установлен")
+        return 1
+    if args.all:
+        panelauth.unban_all()
+        console.ok("сняты все баны fail2ban")
+        return 0
+    if args.ips:
+        ips = [panelauth.validate_ip(ip) for ip in args.ips]
+        panelauth.unban(ips)
+        console.ok(f"сняты баны: {' '.join(ips)}")
+        console.info(
+            f"если панель всё ещё отвечает «неверный логин или пароль» на верный пароль — это лимит 3x-ui "
+            f"({panelauth.LIMITER_COOLDOWN_MIN} мин); сбросить сразу: stealthnode panel-password"
+        )
+        return 0
+    console.header("Баны fail2ban")
+    for jail in panelauth.REPORT_JAILS:
+        banned = panelauth.banned_ips(jail)
+        if banned is None:
+            continue
+        console.line(f"{jail:<18} {len(banned):>3}  {' '.join(banned) or '-'}")
+    console.line("\nСнять: stealthnode unban <IP> [<IP>…] | все: stealthnode unban --all")
+    console.line("Свой IP навсегда в исключения: sudo bash install.sh --admin-ip <IP> (запоминается)")
+    return 0
+
+
 def cmd_version(args, console: Console) -> int:
     print(__version__)
     return 0
@@ -462,6 +628,26 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--db-only", action="store_true")
     r.set_defaults(func=cmd_restore)
 
+    pp = sub.add_parser(
+        "panel-password",
+        help="сменить/восстановить пароль панели и снять блокировки входа",
+        description="Новый логин/пароль панели 3x-ui: применяется в панели, сохраняется в .env и файле учётных "
+        "данных; панель перезапускается (сброс лимита неудачных входов), снимаются баны fail2ban для панели.",
+    )
+    pp.add_argument("--password", help="новый пароль (по умолчанию спросит; Enter — случайный)")
+    pp.add_argument("--random", action="store_true", help="сгенерировать случайный пароль, не спрашивая")
+    pp.add_argument("--username", help="новый логин (по умолчанию текущий логин панели)")
+    pp.add_argument("--reset-2fa", action="store_true", help="отключить 2FA (если потерян доступ к приложению)")
+    pp.add_argument("--no-restart", action="store_true", help="не перезапускать панель")
+    pp.add_argument("--check", action="store_true", help="только проверить: подходит ли пароль из .env")
+    pp.add_argument("--state", action="store_true", help=argparse.SUPPRESS)
+    pp.set_defaults(func=cmd_panel_password)
+
+    ub = sub.add_parser("unban", help="показать/снять баны fail2ban")
+    ub.add_argument("ips", nargs="*", metavar="IP")
+    ub.add_argument("--all", action="store_true", help="снять все баны")
+    ub.set_defaults(func=cmd_unban)
+
     sub.add_parser("credentials", help=f"обновить {config.credentials_path()}").set_defaults(func=cmd_credentials)
     sub.add_parser("token-rotate", help="перевыпустить API-токен панели").set_defaults(func=cmd_token)
     sub.add_parser("version", help="версия").set_defaults(func=cmd_version)
@@ -477,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return int(args.func(args, console) or 0)
-    except (XuiError, ValueError, OSError, json.JSONDecodeError) as exc:
+    except (XuiError, PanelAuthError, ValueError, OSError, json.JSONDecodeError) as exc:
         console.fail(str(exc))
         return 1
     except KeyboardInterrupt:

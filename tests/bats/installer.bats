@@ -104,3 +104,56 @@ teardown() {
     [ "${status}" -eq 0 ]
     [ "${output}" = "$(cat "${REPO}/VERSION")" ]
 }
+
+# --- пароль панели: повторный install.sh не сбрасывает пароль, изменённый в веб-интерфейсе ---
+
+# Заглушки: sn_cli печатает состояние из STATE, «x-ui» записывает аргументы в журнал.
+panel_stubs() {
+    # shellcheck source=../../stealthnode/lib/xui.sh
+    source "${REPO}/stealthnode/lib/xui.sh"
+    XUI_BIN="${TMP}/x-ui"
+    printf '#!/bin/sh\necho "$@" >> "%s/x-ui.calls"\n' "${TMP}" > "${XUI_BIN}"
+    chmod +x "${XUI_BIN}"
+    SN_ROOT="${TMP}"
+    SN_XUI_USERNAME=snowner
+    SN_XUI_PASSWORD='p@ss w0rd'
+    sn_cli() {
+        [ "$*" = "panel-password --state" ] || return 9
+        [ -n "${STATE_FAIL:-}" ] && { echo "[ОШИБ] traceback"; return 1; }
+        echo "${STATE}"
+    }
+}
+
+@test "пароль панели: совпадает с .env — x-ui не вызывается" {
+    panel_stubs
+    STATE=match XUI_FRESH_INSTALL=0 apply_panel_credentials
+    [ ! -e "${TMP}/x-ui.calls" ]
+}
+
+@test "пароль панели: изменён в веб-интерфейсе — повторный запуск его не трогает" {
+    panel_stubs
+    STATE=changed XUI_FRESH_INSTALL=0 run apply_panel_credentials
+    [ "${status}" -eq 0 ]
+    [[ ${output} == *"изменены в веб-интерфейсе"* ]]
+    [[ ${output} == *"stealthnode panel-password"* ]]
+    [ ! -e "${TMP}/x-ui.calls" ]
+}
+
+@test "пароль панели: сбой проверки или неизвестное состояние — тоже не трогаем" {
+    panel_stubs
+    STATE=unknown XUI_FRESH_INSTALL=0 apply_panel_credentials
+    STATE_FAIL=1 XUI_FRESH_INSTALL=0 apply_panel_credentials
+    STATE=garbage XUI_FRESH_INSTALL=0 apply_panel_credentials
+    [ ! -e "${TMP}/x-ui.calls" ]
+}
+
+@test "пароль панели: admin/admin, пустая БД и чистая установка — задаётся из .env" {
+    panel_stubs
+    STATE=default XUI_FRESH_INSTALL=0 apply_panel_credentials
+    STATE=missing XUI_FRESH_INSTALL=0 apply_panel_credentials
+    STATE=changed XUI_FRESH_INSTALL=1 apply_panel_credentials
+    STATE_FAIL=1 XUI_FRESH_INSTALL=1 apply_panel_credentials
+    run cat "${TMP}/x-ui.calls"
+    [ "${#lines[@]}" -eq 4 ]
+    [ "${lines[0]}" = "setting -username snowner -password p@ss w0rd" ]
+}

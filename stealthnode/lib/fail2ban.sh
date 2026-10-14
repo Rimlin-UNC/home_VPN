@@ -7,7 +7,8 @@ setup_fail2ban() {
     local SN_F2B_SSH_PORTS SN_F2B_PANEL_PORT=${SN_PANEL_PORT} SN_F2B_IGNOREIP="127.0.0.1/8 ::1"
     SN_F2B_SSH_PORTS=$( (sshd_cmd -T 2> /dev/null || true) | awk '$1=="port" {print $2}' | sort -un | paste -sd, -)
     [[ -n ${SN_F2B_SSH_PORTS} ]] || SN_F2B_SSH_PORTS=${SN_SSH_PORT:-22}
-    [[ -n ${OPT_ADMIN_IP:-} ]] && SN_F2B_IGNOREIP+=" ${OPT_ADMIN_IP}"
+    # SN_ADMIN_IP (из --admin-ip, хранится в .env): IP/подсети через пробел или запятую.
+    [[ -n ${SN_ADMIN_IP:-} ]] && SN_F2B_IGNOREIP+=" ${SN_ADMIN_IP//,/ }"
     install -d -m 755 /var/log/x-ui
     touch /var/log/x-ui/3xui.log
     render_template "${SN_SRC}/templates/fail2ban/stealthnode.local.tmpl" /etc/fail2ban/jail.d/stealthnode.local 644 \

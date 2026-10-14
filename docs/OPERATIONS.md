@@ -40,6 +40,47 @@ stealthnode doctor --e2e --speed   # + замер скорости через т
 stealthnode info             # сводка: адреса, порты, версии
 ```
 
+## Вход в панель: смена пароля, «не пускает», забытый пароль
+
+Пароль панели можно менять где удобно — в веб-интерфейсе (Настройки → Безопасность) или командой:
+
+```bash
+sudo stealthnode panel-password                 # спросит новый пароль (Enter — сгенерировать случайный)
+sudo stealthnode panel-password --random        # случайный, без вопросов (покажет на экране)
+sudo stealthnode panel-password --username me   # заодно сменить логин
+sudo stealthnode panel-password --reset-2fa     # если потерян телефон с приложением 2FA
+sudo stealthnode panel-password --check         # действует ли пароль из файла учётных данных
+```
+
+Команда применяет пароль в панели, сохраняет его в `.env` и `/root/stealthnode-credentials.txt`,
+перезапускает панель (это сбрасывает блокировку входа; VPN переподключается за секунды) и снимает
+баны fail2ban, из-за которых не открывалась панель.
+
+Пароль, изменённый в веб-интерфейсе, повторный запуск `install.sh` **не сбрасывает** (в 2.0.0
+сбрасывал на исходный из `.env` — исправлено в 2.0.1). Файл учётных данных в этом случае пишет
+«изменён в веб-интерфейсе» вместо устаревшего пароля; `stealthnode doctor` — «вход в панель: изменены».
+
+### Не пускает в панель
+
+| Что видите | Причина | Что делать |
+|---|---|---|
+| «Неверный логин или пароль», хотя пароль верный | встроенная защита 3x-ui: после 5 ошибок за 5 минут вход с этого IP под этим логином закрыт на 15 минут, и всё это время панель отвечает «неверный пароль» даже на правильный | подождать 15 минут или `sudo stealthnode panel-password` (сбрасывает сразу) |
+| То же сразу после смены пароля | браузер/менеджер паролей подставляет старый пароль и быстро исчерпывает 5 попыток | обновить запись в менеджере паролей, затем как в строке выше |
+| Новый пароль перестал подходить после повторного `install.sh` | версия 2.0.0 возвращала пароль из `.env` | обновить StealthNode (`git pull` и `install.sh`), затем `sudo stealthnode panel-password` |
+| Страница панели не открывается (тайм-аут или отказ), а с мобильного интернета открывается | fail2ban: 10 неверных паролей за час — бан IP на порту панели на 1 час | `sudo stealthnode unban` (покажет баны), `sudo stealthnode unban <IP>` или `sudo stealthnode panel-password` |
+| С этого IP перестал работать ещё и VPN | recidive: 3 бана за сутки — неделя на всех портах | `sudo stealthnode unban <IP>` |
+
+Свой домашний IP можно навсегда исключить из банов fail2ban:
+`sudo bash stealthnode/install.sh --admin-ip <IP>` (запоминается; несколько — через запятую).
+
+### Не пускает по SSH
+
+Если сменили пароль root (например, в панели хостинга), а SSH-клиент подставляет старый, после
+3 ошибок за 10 минут IP банится на 24 часа (требование ТЗ). Войдите через веб-консоль (VNC)
+хостинга и выполните `stealthnode unban <ваш IP>` (или `stealthnode unban --all`). При включённом
+`--ssh-keys-only` вход по паролю отключён намеренно — входите по ключу; пароль root нужен только
+для консоли хостинга.
+
 ## Резервные копии
 
 - Автоматически каждый день около 03:15 (таймер `stealthnode-backup.timer`), хранится 14 архивов
@@ -87,10 +128,12 @@ sudo bash ~/home_VPN/stealthnode/install.sh   # сгенерирует новы�
 | Установка | `/var/log/stealthnode/install-*.log` |
 | Панель 3x-ui и Xray | `journalctl -u x-ui`, `/var/log/x-ui/3xui.log` (журнал подключений Xray не ведётся — приватность) |
 | Caddy | `journalctl -u caddy`, `/var/log/caddy/caddy.log` |
-| fail2ban | `fail2ban-client status sshd`, `/var/log/fail2ban.log` |
+| fail2ban | `stealthnode unban` (текущие баны), `fail2ban-client status sshd`, `/var/log/fail2ban.log` |
+| Входы в панель | `grep -E 'failed login\|logged in' /var/log/x-ui/3xui.log` |
 | dnscrypt-proxy | `journalctl -u dnscrypt-proxy` |
 
-Разблокировать IP: `fail2ban-client set sshd unbanip 1.2.3.4` (или `stealthnode-panel`, `3x-ipl`).
+Баны: `stealthnode unban` — список по jail (sshd, stealthnode-panel, recidive, 3x-ipl);
+снять: `stealthnode unban 1.2.3.4` (во всех jail) или `stealthnode unban --all`.
 
 ## Telegram-бот
 

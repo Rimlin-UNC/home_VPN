@@ -5,6 +5,8 @@
 # shellcheck shell=bash
 
 XUI_BIN=/usr/local/x-ui/x-ui
+XUI_DB=/etc/x-ui/x-ui.db
+XUI_FRESH_INSTALL=0
 
 xui_installed_version() {
     [[ -x ${XUI_BIN} ]] || return 1
@@ -19,6 +21,8 @@ install_xui() {
         return 0
     fi
     [[ -n ${have} ]] && info "установлена 3x-ui ${have}, ставим ${XUI_VERSION}"
+    # Чистая панель (базы ещё нет) — только ей configure_xui задаёт логин/пароль из .env.
+    [[ -f ${XUI_DB} ]] || XUI_FRESH_INSTALL=1
     local script
     script=$(mktemp /tmp/xui-install.XXXXXX.sh)
     retry 3 10 curl -fsSL --max-time 120 -o "${script}" "${XUI_INSTALL_URL}" ||
@@ -60,11 +64,43 @@ wait_xui_port() {
     return 1
 }
 
+# Логин/пароль из .env задаются только чистой панели или стандартным admin/admin.
+# Пароль, который владелец сменил в веб-интерфейсе, повторный запуск НЕ сбрасывает
+# (до 2.0.1 сбрасывал — после смены пароля в панели и повторного install.sh вход «ломался»).
+# Сверка идёт по bcrypt-хешу в БД, без попытки входа (лимит 3x-ui и fail2ban не задеваются).
+apply_panel_credentials() {
+    local state
+    state=$(sn_cli panel-password --state 2> /dev/null | tail -n1 || true)
+    case ${state} in
+        match)
+            ok "логин/пароль панели совпадают с ${SN_ROOT}/.env"
+            return 0
+            ;;
+        default | missing) ;;
+        *)
+            # changed, unknown или сбой проверки: чужой пароль не трогаем (кроме чистой панели).
+            if [[ ${XUI_FRESH_INSTALL} != 1 ]]; then
+                if [[ ${state} == changed ]]; then
+                    info "логин/пароль панели изменены в веб-интерфейсе — оставляем как есть"
+                else
+                    warn "не удалось сверить пароль панели с .env — оставляем как есть"
+                fi
+                info "забыли пароль или не пускает: sudo stealthnode panel-password"
+                return 0
+            fi
+            state=fresh
+            ;;
+    esac
+    # default (admin/admin), missing (нет администратора) или только что установленная панель.
+    "${XUI_BIN}" setting -username "${SN_XUI_USERNAME}" -password "${SN_XUI_PASSWORD}" > /dev/null
+    ok "логин/пароль панели заданы из ${SN_ROOT}/.env (${state})"
+}
+
 configure_xui() {
     # Панель слушает только 127.0.0.1; наружу её публикует Caddy по HTTPS.
     systemctl stop x-ui
-    "${XUI_BIN}" setting -listenIP 127.0.0.1 -port "${SN_XUI_PORT}" -webBasePath "${SN_PANEL_PATH}" \
-        -username "${SN_XUI_USERNAME}" -password "${SN_XUI_PASSWORD}" > /dev/null
+    "${XUI_BIN}" setting -listenIP 127.0.0.1 -port "${SN_XUI_PORT}" -webBasePath "${SN_PANEL_PATH}" > /dev/null
+    apply_panel_credentials
     if [[ -n ${OPT_TG_TOKEN:-} && -n ${OPT_TG_CHAT:-} ]]; then
         "${XUI_BIN}" setting -tgbottoken "${OPT_TG_TOKEN}" -tgbotchatid "${OPT_TG_CHAT}" -enabletgbot > /dev/null
         ok "Telegram-бот 3x-ui включён (чат ${OPT_TG_CHAT})"

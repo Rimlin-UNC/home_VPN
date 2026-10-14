@@ -34,6 +34,8 @@ init_env() {
     # SSH-опции запоминаются: повторный запуск без флагов не должен ослабить защиту.
     [[ ${OPT_SSH_KEYS_ONLY:-0} == 1 ]] && args+=("SN_SSH_KEYS_ONLY=1")
     [[ ${OPT_SSH_CLOSE_22:-0} == 1 ]] && args+=("SN_SSH_CLOSE_22=1")
+    # IP владельца для исключений fail2ban тоже запоминается (раньше терялся при повторном запуске).
+    [[ -n ${OPT_ADMIN_IP:-} ]] && args+=("SN_ADMIN_IP=${OPT_ADMIN_IP}")
     [[ -n ${OPT_PANEL_PORT:-} ]] && args+=("SN_PANEL_PORT=${OPT_PANEL_PORT}")
     [[ -n ${OPT_HY2_PORT:-} ]] && args+=("SN_HY2_PORT=${OPT_HY2_PORT}")
     [[ -n ${OPT_LIMIT_GB:-} ]] && args+=("SN_DEFAULT_LIMIT_GB=${OPT_LIMIT_GB}")
