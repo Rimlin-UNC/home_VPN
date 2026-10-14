@@ -30,12 +30,14 @@ jobs:
           python-version: "3.12"
       - name: Инструменты
         run: |
-          pip install pytest==8.3.3 shellcheck-py==0.11.0.1 shfmt-py==4.2.0
+          pip install pytest==8.3.3 shellcheck-py==0.11.0.1 shfmt-py==4.2.0 ruff==0.7.4
           sudo apt-get update -q && sudo apt-get install -y -q bats qrencode
       - name: shellcheck
         run: cd stealthnode && shellcheck -x -S style install.sh uninstall.sh bin/stealthnode ../tests/ci/annotate.sh
       - name: shfmt
         run: shfmt -i 4 -ci -sr -d stealthnode/install.sh stealthnode/uninstall.sh stealthnode/lib/*.sh stealthnode/bin/stealthnode tests/ci/annotate.sh
+      - name: ruff
+        run: ruff check --select F,E9,B,UP --target-version py310 --line-length 120 stealthnode/python tests
       - name: pytest
         run: python -m pytest -q tests/unit
       - name: bats

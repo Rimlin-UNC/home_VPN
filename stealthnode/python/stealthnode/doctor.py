@@ -80,10 +80,22 @@ def check_services(r: Report) -> None:
     code_d, out_d = _sh(["systemctl", "is-active", "dnscrypt-proxy"])
     dns_ok = "active" in (out_s.strip(), out_d.strip())
     r.add(OK if dns_ok else FAIL, "dnscrypt-proxy", f"socket={out_s.strip()}, service={out_d.strip()}")
-    code, out = _sh(["pgrep", "-f", "bin/xray-linux"])
-    r.add(OK if code == 0 else FAIL, "процесс Xray запущен", "" if code == 0 else "не найден")
+    found = wait_xray_process(timeout=15)
+    r.add(OK if found else FAIL, "процесс Xray запущен", "" if found else "не найден (journalctl -u x-ui)")
     code, out = _sh(["ufw", "status"])
     r.add(OK if "Status: active" in out else FAIL, "UFW активен")
+
+
+def wait_xray_process(timeout: float = 15) -> bool:
+    """Процесс ядра Xray (его запускает x-ui; после перезапуска панели — с задержкой в пару секунд)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        code, _ = _sh(["pgrep", "-f", "bin/xray-linux"])
+        if code == 0:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(1)
 
 
 def _listening() -> list[tuple[str, str]]:
@@ -195,7 +207,7 @@ def _mode(path: Path) -> int | None:
 def check_secrets(r: Report) -> None:
     r.console.header("Секреты")
     root = config.sn_root()
-    for path, want in (
+    for path, _want in (
         (config.env_path(), 0o600),
         (config.credentials_path(), 0o600),
         (root / "hysteria" / "server.key", 0o600),
@@ -405,7 +417,9 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def e2e_link(link: links.ShareLink, xray: Path, *, url: str, speed_url: str | None = None) -> tuple[bool, str]:
+def e2e_link(
+    link: links.ShareLink, xray: Path, *, url: str, url2: str | None = None, speed_url: str | None = None
+) -> tuple[bool, str]:
     """Поднять клиент Xray с этой ссылкой (адрес → 127.0.0.1) и сходить в интернет через SOCKS."""
     port = _free_port()
     cfg = links.xray_client_config(link.with_address("127.0.0.1"), port)
@@ -421,16 +435,18 @@ def e2e_link(link: links.ShareLink, xray: Path, *, url: str, speed_url: str | No
                 out = proc.communicate(timeout=5)[0]
                 return False, "клиент Xray не запустился: " + out.strip()[-300:]
             timings = []
-            for _attempt in range(2):  # первый запрос — «холодный» (DNS, рукопожатия), второй — тёплый
+            # Два запроса к разным доменам: первый «холодный» (новое соединение, DNS), второй — к другому
+            # домену, чтобы видеть реальную задержку на новый сайт, а не кэш.
+            for target in (url, url2 or url):
                 code, out = _sh(
                     ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code} %{time_total}", "--max-time", "20",
-                     "--socks5-hostname", f"127.0.0.1:{port}", url],
+                     "--socks5-hostname", f"127.0.0.1:{port}", target],
                     timeout=30,
                 )
                 if code != 0 or not out.strip().startswith(("200", "204")):
                     return False, f"запрос через туннель не прошёл: {out.strip()[:200]}"
                 timings.append(float(out.split()[1]))
-            detail = f"HTTP {out.split()[0]} за {timings[0]:.2f} с (повторно {timings[1]:.2f} с)"
+            detail = f"HTTP {out.split()[0]} за {timings[0]:.2f} с (другой сайт: {timings[1]:.2f} с)"
             if speed_url:
                 code, sp = _sh(
                     ["curl", "-sS", "-o", "/dev/null", "-w", "%{speed_download}", "--max-time", "30",
@@ -463,6 +479,7 @@ def check_e2e(r: Report, s: Settings, xui: XuiClient, speed: bool) -> None:
         r.add(FAIL, "не удалось получить ссылки владельца", str(exc))
         return
     url = os.environ.get("SN_E2E_URL", "https://www.gstatic.com/generate_204")
+    url2 = os.environ.get("SN_E2E_URL2", "https://cp.cloudflare.com/generate_204")
     speed_url = "https://speed.cloudflare.com/__down?bytes=20000000" if speed else None
     for raw in raw_links:
         try:
@@ -470,7 +487,7 @@ def check_e2e(r: Report, s: Settings, xui: XuiClient, speed: bool) -> None:
         except links.LinkError as exc:
             r.add(FAIL, "ссылка не разбирается", str(exc))
             continue
-        ok, detail = e2e_link(link, xray, url=url, speed_url=speed_url)
+        ok, detail = e2e_link(link, xray, url=url, url2=url2, speed_url=speed_url)
         r.add(OK if ok else FAIL, f"туннель {link.kind} работает", detail)
 
 

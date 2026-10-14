@@ -174,7 +174,7 @@ def env(tmp_path_factory):
 
     # «Панель»: те же инбаунды и клиент, что создаёт provision.
     state = FakeXuiState()
-    for i, (tag, inb) in enumerate(payloads.desired_inbounds(s, cert.cert_file, cert.key_file, cert.pin_sha256).items(), 1):
+    for i, (_tag, inb) in enumerate(payloads.desired_inbounds(s, cert.cert_file, cert.key_file, cert.pin_sha256).items(), 1):
         inb = json.loads(json.dumps(inb))
         inb["id"] = i
         state.inbounds.append(inb)

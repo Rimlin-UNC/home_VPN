@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 ALNUM = string.ascii_letters + string.digits
 LOWER_ALNUM = string.ascii_lowercase + string.digits

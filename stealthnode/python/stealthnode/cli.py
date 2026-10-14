@@ -340,8 +340,19 @@ def cmd_restore(args, console: Console) -> int:
     env = not args.db_only
     files = not (args.env_only or args.db_only)
     db = not args.env_only
-    for item in backup.restore(args.archive, env=env, files=files, db=db):
+    restored = backup.restore(args.archive, env=env, files=files, db=db)
+    for item in restored:
         console.ok(f"восстановлено: {item}")
+    if db and str(config.XUI_DB) in restored:
+        # Панель перезапущена с восстановленной БД — дождаться её и ядра Xray.
+        s = config.load_settings()
+        if s.get("SN_XUI_API_TOKEN"):
+            try:
+                provision.wait_for_api(_client(s), timeout=90)
+                doctor.wait_xray_process(timeout=30)
+                console.ok("панель и Xray снова работают")
+            except XuiError as exc:
+                console.warn(f"панель пока не отвечает: {exc}")
     return 0
 
 

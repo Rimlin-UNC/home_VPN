@@ -38,7 +38,7 @@ class ShareLink:
             return "vision"
         return f"vless-{net}"
 
-    def with_address(self, host: str) -> "ShareLink":
+    def with_address(self, host: str) -> ShareLink:
         return ShareLink(self.scheme, self.user, host, self.port, dict(self.params), self.remark)
 
 
