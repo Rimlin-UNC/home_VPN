@@ -26,8 +26,50 @@ ssh_uses_socket() {
     systemctl is-enabled ssh.socket > /dev/null 2>&1 || systemctl is-active ssh.socket > /dev/null 2>&1
 }
 
+# Порт принимает IPv4-подключения (проверка через /dev/tcp на 127.0.0.1).
+port_reachable() {
+    timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2> /dev/null
+}
+
+all_ports_reachable() {
+    local p
+    for p in $1; do
+        port_reachable "${p}" || return 1
+    done
+}
+
+ipv6_enabled() {
+    [[ -e /proc/net/if_inet6 && $(sysctl -n net.ipv6.conf.all.disable_ipv6 2> /dev/null || echo 1) == 0 ]]
+}
+
+restart_sshd() {
+    if ssh_uses_socket; then
+        systemctl daemon-reload
+        systemctl restart ssh.socket
+        # Работающий sshd держит старые слушающие сокеты — перезапускаем, чтобы он взял новые.
+        # Текущие SSH-сессии при этом не обрываются (у каждой свой процесс sshd).
+        if systemctl is-active --quiet ssh.service; then
+            systemctl restart ssh.service
+        fi
+    else
+        systemctl restart ssh 2> /dev/null || systemctl restart sshd
+    fi
+    sleep 1
+}
+
+# Явный drop-in для ssh.socket: IPv4 и (если есть) IPv6 отдельными сокетами.
+write_socket_dropin() {
+    local ports=$1 p sock="[Socket]\nListenStream=\nBindIPv6Only=ipv6-only\n"
+    for p in ${ports}; do
+        sock+="ListenStream=0.0.0.0:${p}\n"
+        ipv6_enabled && sock+="ListenStream=[::]:${p}\n"
+    done
+    printf '%b' "${sock}" | write_if_changed "${SSH_SOCKET_DROPIN}" 644 || true
+}
+
 apply_ssh_config() {
-    local ports=$1 keys_only=$2 content p
+    local ports=$1 keys_only=$2 content p backup=""
+    [[ -f ${SSHD_DROPIN} ]] && backup=$(< "${SSHD_DROPIN}")
     content="# StealthNode: управляется install.sh (не редактируйте вручную)\n"
     for p in ${ports}; do content+="Port ${p}\n"; done
     if [[ ${keys_only} == 1 ]]; then
@@ -36,21 +78,34 @@ apply_ssh_config() {
     fi
     content+="MaxAuthTries 3\nLoginGraceTime 30\nX11Forwarding no\n"
     printf '%b' "${content}" | write_if_changed "${SSHD_DROPIN}" 644 || true
-    sshd_cmd -t || die "sshd -t: ошибка в конфигурации SSH (файл ${SSHD_DROPIN})"
-    if ssh_uses_socket; then
-        # Порты задаёт сокет-юнит; служба получает слушающие сокеты от него при запуске.
-        local sock="[Socket]\nListenStream=\n"
-        for p in ${ports}; do sock+="ListenStream=${p}\n"; done
-        printf '%b' "${sock}" | write_if_changed "${SSH_SOCKET_DROPIN}" 644 || true
-        systemctl daemon-reload
-        systemctl restart ssh.socket
-        # Текущие SSH-сессии при этом не обрываются (у каждой свой процесс sshd).
-        if systemctl is-active --quiet ssh.service; then
-            systemctl restart ssh.service
-        fi
-    else
-        systemctl restart ssh 2> /dev/null || systemctl restart sshd
+    if ! sshd_cmd -t; then
+        restore_ssh_config "${backup}"
+        die "sshd -t: ошибка в конфигурации SSH — изменения отменены"
     fi
+    # Ubuntu 24.04: порты для ssh.socket строит штатный sshd-socket-generator из Port в sshd_config.
+    rm -f "${SSH_SOCKET_DROPIN}"
+    restart_sshd
+    if ssh_uses_socket && ! all_ports_reachable "${ports}"; then
+        warn "генератор ssh.socket не применил порты ${ports} — задаём их явно"
+        write_socket_dropin "${ports}"
+        restart_sshd
+    fi
+    if ! all_ports_reachable "${ports}"; then
+        restore_ssh_config "${backup}"
+        die "SSH не принимает подключения на портах ${ports} — изменения откатены, доступ сохранён"
+    fi
+}
+
+# Откат: прежний drop-in (или его отсутствие) и перезапуск SSH.
+restore_ssh_config() {
+    local backup=$1
+    if [[ -n ${backup} ]]; then
+        printf '%s\n' "${backup}" > "${SSHD_DROPIN}"
+    else
+        rm -f "${SSHD_DROPIN}"
+    fi
+    rm -f "${SSH_SOCKET_DROPIN}"
+    restart_sshd
 }
 
 setup_ssh() {
