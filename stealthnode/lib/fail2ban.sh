@@ -5,7 +5,7 @@
 
 setup_fail2ban() {
     local SN_F2B_SSH_PORTS SN_F2B_PANEL_PORT=${SN_PANEL_PORT} SN_F2B_IGNOREIP="127.0.0.1/8 ::1"
-    SN_F2B_SSH_PORTS=$(sshd -T 2> /dev/null | awk '$1=="port" {print $2}' | sort -un | paste -sd, -)
+    SN_F2B_SSH_PORTS=$( (sshd -T 2> /dev/null || true) | awk '$1=="port" {print $2}' | sort -un | paste -sd, -)
     [[ -n ${SN_F2B_SSH_PORTS} ]] || SN_F2B_SSH_PORTS=${SN_SSH_PORT:-22}
     [[ -n ${OPT_ADMIN_IP:-} ]] && SN_F2B_IGNOREIP+=" ${OPT_ADMIN_IP}"
     install -d -m 755 /var/log/x-ui
@@ -27,7 +27,7 @@ setup_fail2ban() {
         sleep 1
     done
     local jails
-    jails=$(fail2ban-client status 2> /dev/null | sed -n 's/.*Jail list:\s*//p')
+    jails=$( (fail2ban-client status 2> /dev/null || true) | sed -n 's/.*Jail list:\s*//p')
     [[ ${jails} == *sshd* ]] || die "fail2ban: jail sshd не запустился (${jails})"
     [[ ${jails} == *stealthnode-panel* ]] || die "fail2ban: jail stealthnode-panel не запустился (${jails})"
     ok "fail2ban: ${jails}"

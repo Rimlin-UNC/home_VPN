@@ -52,6 +52,7 @@ configure_caddy() {
     install -d -m 755 -o caddy -g caddy /var/log/caddy
     chown -R caddy:caddy /var/log/caddy
     install -m 644 "${SN_ROOT}/caddy/Caddyfile" /etc/caddy/Caddyfile.new
+    info "проверка Caddyfile (caddy validate)"
     if ! runuser -u caddy -- caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new > /tmp/caddy-validate.log 2>&1; then
         cat /tmp/caddy-validate.log >&2
         rm -f /etc/caddy/Caddyfile.new
@@ -61,6 +62,7 @@ configure_caddy() {
     chown -R caddy:caddy /var/log/caddy
     mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
     systemctl enable caddy > /dev/null 2>&1
+    info "применение конфигурации Caddy"
     if systemctl is-active --quiet caddy; then
         systemctl reload caddy || systemctl restart caddy
     else
