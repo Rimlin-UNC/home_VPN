@@ -1,0 +1,13 @@
+// StealthNode: только обновления безопасности Ubuntu (без смены мажорных версий).
+Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+        "${distro_id}ESMApps:${distro_codename}-apps-security";
+        "${distro_id}ESM:${distro_codename}-infra-security";
+};
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+// Перезагрузка нужна только после обновления ядра; время — UTC (01:30 UTC = 04:30 МСК).
+Unattended-Upgrade::Automatic-Reboot "${SN_REBOOT}";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+Unattended-Upgrade::Automatic-Reboot-Time "${SN_REBOOT_TIME}";

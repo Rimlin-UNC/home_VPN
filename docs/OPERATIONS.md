@@ -1,0 +1,169 @@
+# Обслуживание StealthNode
+
+Все команды — от root (`sudo`). Справка: `stealthnode --help`, `stealthnode user --help`.
+
+## Пользователи
+
+```bash
+stealthnode user list                       # все пользователи: трафик, лимит, IP, онлайн
+stealthnode user add sister                 # лимиты по умолчанию (SN_DEFAULT_LIMIT_GB / SN_DEFAULT_IP_LIMIT)
+stealthnode user add guest --gb 10 --ip 1 --days 30   # временный доступ на 30 дней
+stealthnode user add me2 --unlimited        # без лимитов
+stealthnode user show sister --qr           # подписка, ссылки, QR-код в терминале
+stealthnode user limit sister --gb 80 --ip 3  # изменить лимиты (трафик сбрасывается 1-го числа)
+stealthnode user reset sister               # обнулить трафик сейчас
+stealthnode user del guest --yes            # удалить
+stealthnode links                           # пересоздать файлы ссылок и QR для всех
+```
+
+Файлы для отправки пользователю: `/opt/stealthnode/users/<имя>/links.txt`,
+`qr-subscription.png` (главный), `qr-xhttp.png`, `qr-vision.png`, `qr-hysteria2.png`.
+Скачать к себе: `scp root@<IP>:/opt/stealthnode/users/mama/qr-subscription.png .`
+
+То же можно делать в панели 3X-UI («Клиенты»): пользователь, созданный в панели, должен быть
+привязан ко всем трём инбаундам `SN-*` (команда `stealthnode provision` привяжет недостающие).
+
+### Как работают лимиты
+
+- **Трафик** — одна квота на человека для всех трёх профилей. При исчерпании 3x-ui отключает
+  пользователя (соединения рвутся), 1-го числа месяца трафик обнуляется и доступ возвращается
+  (часовой пояс — `SN_TIMEZONE`, по умолчанию Europe/Moscow).
+- **IP** — сколько разных IP могут быть подключены одновременно. Превышение: «лишний» старый IP
+  блокируется fail2ban (jail `3x-ipl`) на 30 минут на всех портах, кроме SSH и панели.
+
+## Проверка состояния
+
+```bash
+stealthnode doctor           # службы, порты, UFW, BBR, fail2ban, DNS, HTTPS, REALITY, подписка, права
+stealthnode doctor --e2e     # + реальное подключение по каждому профилю
+stealthnode doctor --e2e --speed   # + замер скорости через туннель (с сервера)
+stealthnode info             # сводка: адреса, порты, версии
+```
+
+## Вход в панель: смена пароля, «не пускает», забытый пароль
+
+Пароль панели можно менять где удобно — в веб-интерфейсе (Настройки → Безопасность) или командой:
+
+```bash
+sudo stealthnode panel-password                 # спросит новый пароль (Enter — сгенерировать случайный)
+sudo stealthnode panel-password --random        # случайный, без вопросов (покажет на экране)
+sudo stealthnode panel-password --username me   # заодно сменить логин
+sudo stealthnode panel-password --reset-2fa     # если потерян телефон с приложением 2FA
+sudo stealthnode panel-password --check         # действует ли пароль из файла учётных данных
+```
+
+Команда применяет пароль в панели, сохраняет его в `.env` и `/root/stealthnode-credentials.txt`,
+перезапускает панель (это сбрасывает блокировку входа; VPN переподключается за секунды) и снимает
+баны fail2ban, из-за которых не открывалась панель.
+
+Пароль, изменённый в веб-интерфейсе, повторный запуск `install.sh` **не сбрасывает** (в 2.0.0
+сбрасывал на исходный из `.env` — исправлено в 2.0.1). Файл учётных данных в этом случае пишет
+«изменён в веб-интерфейсе» вместо устаревшего пароля; `stealthnode doctor` — «вход в панель: изменены».
+
+### Не пускает в панель
+
+| Что видите | Причина | Что делать |
+|---|---|---|
+| «Неверный логин или пароль», хотя пароль верный | встроенная защита 3x-ui: после 5 ошибок за 5 минут вход с этого IP под этим логином закрыт на 15 минут, и всё это время панель отвечает «неверный пароль» даже на правильный | подождать 15 минут или `sudo stealthnode panel-password` (сбрасывает сразу) |
+| То же сразу после смены пароля | браузер/менеджер паролей подставляет старый пароль и быстро исчерпывает 5 попыток | обновить запись в менеджере паролей, затем как в строке выше |
+| Новый пароль перестал подходить после повторного `install.sh` | версия 2.0.0 возвращала пароль из `.env` | обновить StealthNode (`git pull` и `install.sh`), затем `sudo stealthnode panel-password` |
+| Страница панели не открывается (тайм-аут или отказ), а с мобильного интернета открывается | fail2ban: 10 неверных паролей за час — бан IP на порту панели на 1 час | `sudo stealthnode unban` (покажет баны), `sudo stealthnode unban <IP>` или `sudo stealthnode panel-password` |
+| С этого IP перестал работать ещё и VPN | recidive: 3 бана за сутки — неделя на всех портах | `sudo stealthnode unban <IP>` |
+
+Свой домашний IP можно навсегда исключить из банов fail2ban:
+`sudo bash stealthnode/install.sh --admin-ip <IP>` (запоминается; несколько — через запятую).
+
+### Не пускает по SSH
+
+Если сменили пароль root (например, в панели хостинга), а SSH-клиент подставляет старый, после
+3 ошибок за 10 минут IP банится на 24 часа (требование ТЗ). Войдите через веб-консоль (VNC)
+хостинга и выполните `stealthnode unban <ваш IP>` (или `stealthnode unban --all`). При включённом
+`--ssh-keys-only` вход по паролю отключён намеренно — входите по ключу; пароль root нужен только
+для консоли хостинга.
+
+## Связка «российский мост → зарубежный выход»
+
+Подробно — [RELAY.md](RELAY.md).
+
+```bash
+# на зарубежном сервере (выход)
+sudo stealthnode exit enable 31.59.126.178   # инбаунд для моста, UFW только для него, ссылка + архив
+sudo stealthnode exit link                   # ссылка выхода (секрет) для --exit-link / bridge set
+sudo stealthnode exit status                 # инбаунд, правило UFW, трафик моста
+sudo stealthnode exit disable
+# на российском сервере (мост)
+sudo stealthnode bridge status               # доступен ли выход, маскировка REALITY на выходе
+sudo stealthnode bridge set 'vless://…'      # сменить выход (сначала проверяет его доступность)
+sudo stealthnode bridge off                  # выключить связку (трафик пойдёт с самого моста)
+```
+
+Пользователей на схеме с мостом заводят **на мосту**: там панель, лимиты и подписки.
+
+## Резервные копии
+
+- Автоматически каждый день около 03:15 (таймер `stealthnode-backup.timer`), хранится 14 архивов
+  в `/opt/stealthnode/backups/` (права 600).
+- Вручную: `stealthnode backup [--keep N]`.
+- Что внутри: БД панели (согласованный снимок SQLite), `.env` (ключи и пароли), профили
+  пользователей, сертификаты Hysteria2, Caddyfile, файл учётных данных.
+- **Храните копию вне сервера** (архив содержит секреты — только в надёжном месте):
+  `scp root@<IP>:/opt/stealthnode/backups/stealthnode-*.tar.gz ~/backup/`.
+- Восстановление на том же сервере: `stealthnode restore <архив>`;
+  на новом — `install.sh --restore <архив>` ([INSTALL.md](INSTALL.md#переезд-на-новый-vps-например-ip-заблокирован)).
+- Telegram-бот 3x-ui (если включён) умеет присылать бэкап БД панели.
+
+## Обновления
+
+| Что | Как |
+|---|---|
+| Ubuntu (безопасность) | автоматически (unattended-upgrades), перезагрузка при обновлении ядра в 01:30 UTC |
+| StealthNode | `cd ~/home_VPN && git pull && sudo bash stealthnode/install.sh` (повторный запуск безопасен) |
+| 3X-UI и Xray | версия закреплена в `stealthnode/versions.env`; обновляется вместе с StealthNode после проверки в CI. Встроенное обновление панели (`x-ui update`) возможно, но не проверено нами — сначала `stealthnode backup` |
+| Caddy | из официального APT-репозитория вместе с системными пакетами (`apt upgrade`) |
+
+## Сертификаты
+
+- Панель и подписка: Caddy получает и продлевает Let's Encrypt сам (нужен открытый 80/tcp).
+- Hysteria2: таймер `stealthnode-certsync.timer` каждые 6 часов копирует сертификат Caddy в
+  `/opt/stealthnode/hysteria/` и перезапускает Xray при изменении. Вручную: `stealthnode cert-sync`.
+
+## Смена SNI или ключей REALITY
+
+```bash
+stealthnode sni-check                  # проверить кандидатов с сервера
+stealthnode sni-set ya.ru              # сменить SNI и цель на обоих VLESS-профилях
+# новые ключи REALITY (если ключ скомпрометирован):
+stealthnode env set SN_REALITY_PRIVATE_KEY= SN_REALITY_SHORT_ID=
+sudo bash ~/home_VPN/stealthnode/install.sh   # сгенерирует новые и применит
+```
+
+После смены пользователям нужно **обновить подписку** в приложении (или подождать автообновления).
+
+## Журналы
+
+| Что | Где |
+|---|---|
+| Установка | `/var/log/stealthnode/install-*.log` |
+| Панель 3x-ui и Xray | `journalctl -u x-ui`, `/var/log/x-ui/3xui.log` (журнал подключений Xray не ведётся — приватность) |
+| Caddy | `journalctl -u caddy`, `/var/log/caddy/caddy.log` |
+| fail2ban | `stealthnode unban` (текущие баны), `fail2ban-client status sshd`, `/var/log/fail2ban.log` |
+| Входы в панель | `grep -E 'failed login\|logged in' /var/log/x-ui/3xui.log` |
+| dnscrypt-proxy | `journalctl -u dnscrypt-proxy` |
+
+Баны: `stealthnode unban` — список по jail (sshd, stealthnode-panel, recidive, 3x-ipl);
+снять: `stealthnode unban 1.2.3.4` (во всех jail) или `stealthnode unban --all`.
+
+## Telegram-бот
+
+Встроенный бот 3x-ui (русский язык): статистика, уведомления о входе в панель, исчерпании
+трафика, бэкапы. Включение: создайте бота у @BotFather, узнайте свой chat id (например, через
+@userinfobot) и выполните `sudo bash stealthnode/install.sh --tg-token <токен> --tg-chat <id>`
+(или в панели: «Настройки» → «Telegram-бот»).
+
+## Удаление
+
+```bash
+sudo bash stealthnode/uninstall.sh               # убрать StealthNode, оставить 3x-ui, профили и бэкапы
+sudo bash stealthnode/uninstall.sh --purge-panel # + удалить 3x-ui и Caddy
+sudo bash stealthnode/uninstall.sh --purge-all   # + удалить /opt/stealthnode (включая бэкапы)
+```

@@ -1,0 +1,7 @@
+[Unit]
+Description=StealthNode: синхронизация сертификата Hysteria2 с Caddy (Let's Encrypt)
+After=x-ui.service caddy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/stealthnode cert-sync

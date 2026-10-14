@@ -1,0 +1,266 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore: ["legacy/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint-and-unit:
+    name: Линтеры и unit-тесты
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Инструменты
+        run: |
+          pip install pytest==8.3.3 shellcheck-py==0.11.0.1 shfmt-py==4.2.0 ruff==0.7.4
+          sudo apt-get update -q && sudo apt-get install -y -q bats qrencode
+      - name: shellcheck
+        run: cd stealthnode && shellcheck -x -S style install.sh uninstall.sh bin/stealthnode ../tests/ci/annotate.sh
+      - name: shfmt
+        run: shfmt -i 4 -ci -sr -d stealthnode/install.sh stealthnode/uninstall.sh stealthnode/lib/*.sh stealthnode/bin/stealthnode tests/ci/annotate.sh
+      - name: ruff
+        run: ruff check --select F,E9,B,UP --target-version py310 --line-length 120 stealthnode/python tests
+      - name: pytest
+        run: python -m pytest -q tests/unit
+      - name: bats
+        run: bats tests/bats
+
+  protocols:
+    name: E2E протоколов (Xray 26.10.10 + Hysteria 2.13)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Ядра Xray и Hysteria2 (сборки с PyPI)
+        run: pip install pytest==8.3.3 xray-core==1.8.26.13 hysteria2==2.13.0
+      - name: pytest tests/e2e
+        run: python -m pytest -v tests/e2e 2>&1 | tee /tmp/protocols.log
+      - name: Аннотации
+        if: always()
+        run: bash tests/ci/annotate.sh notice protocols /tmp/protocols.log 60 300
+
+  e2e-install:
+    name: Полная установка на Ubuntu 24.04 + doctor --e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Установка StealthNode (tls internal, без apt upgrade)
+        run: |
+          mkdir -p /tmp/ci
+          sudo bash stealthnode/install.sh --domain vpn.example.test --tls internal --skip-upgrade \
+            --no-auto-reboot --user mama:50:2 --user papa:30:1 --no-doctor 2>&1 | tee /tmp/ci/1-install.log
+      - name: doctor --e2e
+        run: sudo stealthnode doctor --e2e --speed 2>&1 | tee /tmp/ci/2-doctor.log
+      - name: Контракт API 3x-ui и ссылки
+        run: sudo python3 tests/ci/contract_check.py 2>&1 | tee /tmp/ci/3-contract.log
+      - name: Фильтр fail2ban для панели (fail2ban-regex)
+        run: |
+          fail2ban-regex tests/data/3xui-failed-login.txt /etc/fail2ban/filter.d/stealthnode-panel.conf 2>&1 | tee /tmp/ci/3a-f2b.log
+          # 4 настоящих ошибки (в т.ч. подделка «too many failed attempts» в логине), 1 отказ лимита 3x-ui — не считается
+          grep -q 'Lines: 7 lines, 1 ignored, 4 matched, 2 missed' /tmp/ci/3a-f2b.log
+          ips=$(fail2ban-regex -o '<ip>' tests/data/3xui-failed-login.txt /etc/fail2ban/filter.d/stealthnode-panel.conf 2>/dev/null \
+            | grep -E '^[0-9a-f.:]+$' | sort | tr '\n' ' ')
+          echo "IP: ${ips}" | tee -a /tmp/ci/3a-f2b.log
+          [ "${ips}" = "198.51.100.9 2001:db8::5 203.0.113.7 203.0.113.8 " ]
+      - name: Время ответа DNS (dnscrypt-proxy)
+        run: |
+          for q in www.gstatic.com www.wikipedia.org; do
+            for proto in "" "+tcp"; do
+              printf '%s %s: ' "$q" "${proto:-udp}"; dig $proto @127.0.2.1 "$q" A | grep -E 'Query time' || echo 'нет ответа'
+            done
+          done 2>&1 | tee /tmp/ci/3b-dns.log
+      - name: Управление пользователями
+        run: |
+          {
+            set -x
+            sudo stealthnode user add test1 --gb 1 --ip 1
+            sudo stealthnode user list
+            sudo stealthnode user limit test1 --gb 2 --ip 2
+            sudo stealthnode user show test1
+            sudo stealthnode user del test1 --yes
+            sudo stealthnode user list
+          } 2>&1 | tee /tmp/ci/4-users.log
+      - name: Пароль панели — смена в веб-интерфейсе (как делает владелец)
+        # «! cmd» под set -e никогда не роняет шаг (так устроен bash), поэтому везде «! cmd || exit 1».
+        run: |
+          {
+            set -x
+            P="sudo python3 tests/ci/panel_login.py"
+            U=$(sudo stealthnode env get SN_XUI_USERNAME)
+            PW=$(sudo stealthnode env get SN_XUI_PASSWORD)
+            $P login "$U" "$PW" --expect ok
+            [ "$(sudo stealthnode panel-password --state)" = match ]
+            $P change "$U" "$PW" ciowner 'Сменил-в-UI 2026'
+            $P login ciowner 'Сменил-в-UI 2026' --expect ok
+            $P login "$U" "$PW" --expect fail
+            [ "$(sudo stealthnode panel-password --state)" = changed ]
+            sudo stealthnode panel-password --check
+            sudo stealthnode credentials
+            # устаревший пароль больше не выдаётся за действующий
+            ! sudo grep -qF "$PW" /root/stealthnode-credentials.txt || exit 1
+            sudo grep -F 'изменён в веб-интерфейсе' /root/stealthnode-credentials.txt
+            # .env через env set не «меняет» пароль панели
+            ! sudo stealthnode env set SN_XUI_PASSWORD=whatever-123456 || exit 1
+          } 2>&1 | tee /tmp/ci/5a-panel-ui.log
+      - name: Повторный запуск установщика (идемпотентность, пароль из веб-интерфейса сохраняется)
+        run: |
+          sudo bash stealthnode/install.sh --tls internal --skip-upgrade --no-auto-reboot --no-doctor \
+            --admin-ip 198.51.100.77 2>&1 | tee /tmp/ci/5-reinstall.log
+          {
+            set -x
+            # регрессия 2.0.0: здесь пароль сбрасывался на исходный из .env
+            grep -F 'изменены в веб-интерфейсе' /tmp/ci/5-reinstall.log
+            sudo python3 tests/ci/panel_login.py login ciowner 'Сменил-в-UI 2026' --expect ok
+            [ "$(sudo stealthnode panel-password --state)" = changed ]
+            sudo grep -E '^ignoreip = .*198\.51\.100\.77' /etc/fail2ban/jail.d/stealthnode.local
+            sudo stealthnode doctor --e2e
+          } 2>&1 | tee -a /tmp/ci/5-reinstall.log
+      - name: Блокировка входа и восстановление (лимит 3x-ui, fail2ban, stealthnode panel-password)
+        run: |
+          {
+            set -x
+            P="sudo python3 tests/ci/panel_login.py"
+            IP=192.0.2.10
+            sudo ip addr add "$IP/32" dev lo
+            # 5 неверных паролей за 5 минут → лимит 3x-ui: 15 минут «неверный пароль» даже на верный
+            for i in 1 2 3 4 5; do $P login ciowner "wrong-$i" --source-ip "$IP" --expect fail; done
+            for i in 1 2 3; do $P login ciowner 'Сменил-в-UI 2026' --source-ip "$IP" --expect fail; done
+            $P login ciowner 'Сменил-в-UI 2026' --expect ok
+            # ещё 4 настоящие ошибки (лимит считает пары IP+логин): всего 9 < 10 — бана нет,
+            # отказы лимита (3 строки «too many failed attempts») fail2ban не считает
+            for i in 1 2 3 4; do $P login "nobody$i" "wrong-$i" --source-ip "$IP" --expect fail; done
+            sleep 5
+            ! sudo fail2ban-client status stealthnode-panel | grep -qF "$IP" || exit 1
+            # 10-я настоящая ошибка → бан на порту панели
+            $P login nobody5 wrong-5 --source-ip "$IP" --expect fail
+            for _ in $(seq 1 20); do sudo fail2ban-client status stealthnode-panel | grep -qF "$IP" && break; sleep 1; done
+            sudo fail2ban-client status stealthnode-panel | grep -F "$IP"
+            $P login ciowner 'Сменил-в-UI 2026' --source-ip "$IP" --expect blocked
+            sudo stealthnode unban | grep -F "$IP"
+            # восстановление одной командой: новый пароль, сброс лимита (перезапуск панели), снятие бана
+            sudo stealthnode panel-password --password 'Восстановлен-2026'
+            ! sudo fail2ban-client status stealthnode-panel | grep -qF "$IP" || exit 1
+            $P login ciowner 'Восстановлен-2026' --source-ip "$IP" --expect ok
+            $P login ciowner 'Сменил-в-UI 2026' --expect fail
+            [ "$(sudo stealthnode panel-password --state)" = match ]
+            sudo grep -F 'Пароль:  Восстановлен-2026' /root/stealthnode-credentials.txt
+            sudo stealthnode doctor --e2e
+          } 2>&1 | tee /tmp/ci/5b-lockout.log
+      - name: Связка мост → выход (одна 3x-ui в обеих ролях, петля через 127.0.0.1)
+        run: |
+          {
+            set -x
+            sudo stealthnode exit enable 127.0.0.1
+            sudo stealthnode exit status
+            # Мост подключается к выходу по адресу из ссылки; здесь выход — этот же сервер.
+            LINK=$(sudo stealthnode exit link | sed -E 's#@[^:/]+:#@127.0.0.1:#')
+            sudo stealthnode bridge set "$LINK"
+            sudo stealthnode bridge status
+            # Шаблон с исходящим на выход, geoip:ru и правилом против петли принят настоящими 3x-ui и Xray
+            sudo stealthnode doctor --e2e
+            # Трафик пользователей прошёл через инбаунд выхода: у учётной записи моста растёт счётчик
+            for _ in $(seq 1 12); do
+              sudo stealthnode exit status | tee /tmp/ci/exit-status.txt
+              grep -q 'Трафик моста: ↑ 0 Б, ↓ 0 Б' /tmp/ci/exit-status.txt || break
+              sleep 5
+            done
+            ! grep -q 'Трафик моста: ↑ 0 Б, ↓ 0 Б' /tmp/ci/exit-status.txt || exit 1
+            sudo stealthnode bridge off
+            sudo stealthnode exit disable
+            ! sudo ufw status | grep -F 'StealthNode exit for bridge' || exit 1
+            sudo stealthnode doctor --e2e
+          } 2>&1 | tee /tmp/ci/5c-chain.log
+      - name: Резервная копия и восстановление
+        run: |
+          {
+            set -x
+            sudo stealthnode backup
+            f=$(sudo sh -c 'ls -1t /opt/stealthnode/backups/stealthnode-*.tar.gz | head -n1')
+            sudo tar -tzf "$f"
+            sudo stealthnode restore "$f"
+            sudo stealthnode doctor --e2e
+          } 2>&1 | tee /tmp/ci/6-backup.log
+      - name: SSH — нестандартный порт, только ключи, закрытие 22 (ssh.socket в Ubuntu 24.04)
+        run: |
+          {
+            set -x
+            command -v sshd || sudo apt-get install -y -q openssh-server
+            sudo ssh-keygen -A
+            ssh-keygen -q -t ed25519 -N '' -f /tmp/k
+            sudo install -d -m 700 /root/.ssh
+            sudo install -m 600 /tmp/k.pub /root/.ssh/authorized_keys
+            sudo bash stealthnode/install.sh --skip-upgrade --no-auto-reboot --no-doctor --ssh-port 2222 --ssh-keys-only
+            sudo ss -Hltn | grep -E ':(22|2222)\b'
+            # IPv4 обязателен: Ubuntu-генератор ставит BindIPv6Only=ipv6-only, и [::]:порт не принимает IPv4
+            sudo ss -Hltn | grep -E '(0\.0\.0\.0|\*):2222\b'
+            sudo sshd -T | grep -E '^(port|passwordauthentication|permitrootlogin|kbdinteractiveauthentication) '
+            ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i /tmp/k -p 2222 root@127.0.0.1 true
+            ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i /tmp/k -p 22 root@127.0.0.1 true
+            sudo sshd -T | grep -qx 'passwordauthentication no'
+            sudo sshd -T | grep -qx 'permitrootlogin without-password'
+            sudo bash stealthnode/install.sh --skip-upgrade --no-auto-reboot --no-doctor --ssh-close-22
+            sudo ss -Hltn | grep -E ':2222\b'
+            ! sudo ss -Hltn | grep -E ':22\b' || exit 1
+            ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i /tmp/k -p 2222 root@127.0.0.1 true
+            ! sudo ufw status | grep -E '^22/tcp' || exit 1
+            sudo fail2ban-client get sshd actions
+            # --admin-ip из предыдущего запуска запомнен (раньше терялся)
+            sudo grep -E '^ignoreip = .*198\.51\.100\.77' /etc/fail2ban/jail.d/stealthnode.local
+            [ "$(sudo stealthnode panel-password --state)" = match ]
+            sudo stealthnode doctor
+          } 2>&1 | tee /tmp/ci/7-ssh.log
+      - name: Отчёт (аннотации)
+        if: always()
+        run: |
+          set +e
+          for f in /tmp/ci/2-doctor.log /tmp/ci/3-contract.log /tmp/ci/3a-f2b.log /tmp/ci/3b-dns.log; do
+            [ -s "$f" ] && bash tests/ci/annotate.sh notice "$(basename "$f")" "$f" 60 120
+          done
+          [ -s /tmp/ci/5-reinstall.log ] && bash tests/ci/annotate.sh notice 5-reinstall.log /tmp/ci/5-reinstall.log 60 60
+          for f in /tmp/ci/5a-panel-ui.log /tmp/ci/5b-lockout.log /tmp/ci/5c-chain.log; do
+            [ -s "$f" ] && bash tests/ci/annotate.sh notice "$(basename "$f")" "$f" 60 120
+          done
+          [ -s /tmp/ci/7-ssh.log ] && bash tests/ci/annotate.sh warning 7-ssh.log /tmp/ci/7-ssh.log 60 180
+          [ -s /tmp/ci/1-install.log ] && grep -E '^\[|^==>' /tmp/ci/1-install.log > /tmp/ci/1-install-summary.log && \
+            bash tests/ci/annotate.sh notice 1-install-summary.log /tmp/ci/1-install-summary.log 60 120
+      - name: Диагностика при ошибке
+        if: failure()
+        run: |
+          set +e
+          {
+            sudo systemctl --no-pager status x-ui caddy fail2ban dnscrypt-proxy.socket
+            sudo journalctl -u x-ui --no-pager -n 80
+            sudo journalctl -u caddy --no-pager -n 40
+            sudo journalctl -u dnscrypt-proxy -u dnscrypt-proxy.socket --no-pager -n 40
+            dnscrypt-proxy -version
+            sudo tail -n 60 /var/log/x-ui/3xui.log
+            sudo cat /etc/caddy/Caddyfile
+            sudo ss -lntup
+            sudo ufw status verbose
+            sudo fail2ban-client status
+          } > /tmp/ci/9-system.log 2>&1
+          last=$(ls -1 /tmp/ci/*.log | grep -v -e 9-system -e summary | tail -n1)
+          bash tests/ci/annotate.sh error "$(basename "$last")" "$last" 50 400
+          bash tests/ci/annotate.sh warning system /tmp/ci/9-system.log 60 600
