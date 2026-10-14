@@ -148,6 +148,13 @@ is_ipv4() {
     for o in ${ip}; do ((o <= 255)) || return 1; done
 }
 
+# sshd -t / sshd -T требуют /run/sshd. В Ubuntu 24.04 (ssh.socket) каталог создаётся только
+# при первом запуске sshd, поэтому на свежей системе проверки конфигурации падают.
+sshd_cmd() {
+    install -d -m 755 /run/sshd 2> /dev/null || true
+    sshd "$@"
+}
+
 # Вызов CLI StealthNode из установленного приложения.
 sn_cli() {
     PYTHONPATH="${SN_APP_DIR}/python" python3 -m stealthnode "$@"

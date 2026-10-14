@@ -75,6 +75,11 @@ jobs:
         run: sudo stealthnode doctor --e2e --speed 2>&1 | tee /tmp/ci/2-doctor.log
       - name: Контракт API 3x-ui и ссылки
         run: sudo python3 tests/ci/contract_check.py 2>&1 | tee /tmp/ci/3-contract.log
+      - name: Фильтр fail2ban для панели (fail2ban-regex)
+        run: |
+          out=$(fail2ban-regex -o '<ip>' tests/data/3xui-failed-login.log /etc/fail2ban/filter.d/stealthnode-panel.conf)
+          echo "$out"
+          [ "$(printf '%s\n' "$out" | sort | tr '\n' ' ')" = "2001:db8::5 203.0.113.7 203.0.113.8 " ]
       - name: Время ответа DNS (dnscrypt-proxy)
         run: |
           for q in www.gstatic.com www.wikipedia.org; do

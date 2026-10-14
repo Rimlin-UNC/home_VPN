@@ -36,15 +36,21 @@ apply_ssh_config() {
     fi
     content+="MaxAuthTries 3\nLoginGraceTime 30\nX11Forwarding no\n"
     printf '%b' "${content}" | write_if_changed "${SSHD_DROPIN}" 644 || true
-    sshd -t || die "sshd -t: ошибка в конфигурации SSH (файл ${SSHD_DROPIN})"
+    sshd_cmd -t || die "sshd -t: ошибка в конфигурации SSH (файл ${SSHD_DROPIN})"
     if ssh_uses_socket; then
+        # Порты задаёт сокет-юнит; служба получает слушающие сокеты от него при запуске.
         local sock="[Socket]\nListenStream=\n"
         for p in ${ports}; do sock+="ListenStream=${p}\n"; done
         printf '%b' "${sock}" | write_if_changed "${SSH_SOCKET_DROPIN}" 644 || true
         systemctl daemon-reload
         systemctl restart ssh.socket
+        # Текущие SSH-сессии при этом не обрываются (у каждой свой процесс sshd).
+        if systemctl is-active --quiet ssh.service; then
+            systemctl restart ssh.service
+        fi
+    else
+        systemctl restart ssh 2> /dev/null || systemctl restart sshd
     fi
-    systemctl reload ssh 2> /dev/null || systemctl restart ssh 2> /dev/null || true
 }
 
 setup_ssh() {

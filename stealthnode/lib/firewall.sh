@@ -7,7 +7,7 @@
 current_ssh_ports() {
     {
         ss -Hltnp 2> /dev/null | awk '/"sshd"|"systemd"/ && /:22 |sshd/ {print $4}' | grep -oE '[0-9]+$' || true
-        sshd -T 2> /dev/null | awk '$1=="port" {print $2}' || true
+        sshd_cmd -T 2> /dev/null | awk '$1=="port" {print $2}' || true
     } | sort -un
 }
 
