@@ -215,10 +215,10 @@ def cmd_user(args, console: Console) -> int:
     if args.action == "add":
         gb = 0 if args.unlimited else (args.gb if args.gb is not None else s.int("SN_DEFAULT_LIMIT_GB", 50))
         ip = 0 if args.unlimited else (args.ip if args.ip is not None else s.int("SN_DEFAULT_IP_LIMIT", 2))
+        # 3x-ui v3 добавляет клиента в работающий Xray через его API — без перезапуска ядра.
         client = users.add_user(
             xui, args.name, limit_gb=gb, ip_limit=ip, monthly=not args.no_reset, days=args.days, comment=args.comment
         )
-        xui.restart_xray()
         console.ok(f"пользователь {client['email']} создан: {gb:g} ГБ{' в месяц' if gb and not args.no_reset else ''}, IP-лимит {ip or '∞'}")
         created = users.find_user(xui, client["email"]) or client
         d = users.write_user_files(xui, s, created)
@@ -231,7 +231,6 @@ def cmd_user(args, console: Console) -> int:
             console.fail("удаление необратимо: повторите с --yes")
             return 2
         users.delete_user(xui, args.name)
-        xui.restart_xray()
         users.write_admin_links(xui, s)
         console.ok(f"пользователь {args.name} удалён")
         return 0
@@ -254,7 +253,6 @@ def cmd_user(args, console: Console) -> int:
         return 0
     if args.action == "limit":
         users.set_limits(xui, args.name, limit_gb=args.gb, ip_limit=args.ip)
-        xui.restart_xray()
         console.ok(f"лимиты пользователя {args.name} обновлены")
         return 0
     return 2

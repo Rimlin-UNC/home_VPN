@@ -65,6 +65,7 @@ def test_provision_creates_everything_and_is_idempotent(settings, fake):
     res2 = provision.provision(settings, xui, quiet(), extra_users=[("mama", 50, 2)], restart_panel_if_needed=False)
     assert res2.created_inbounds == [] and res2.updated_inbounds == [] and res2.created_users == []
     assert res2.settings_changed == [] and not res2.template_changed
+    assert st.xray_restarts == 1  # повторный запуск не рвёт соединения пользователей
     writes = [c for c in st.calls[calls_before:] if c[0] == "POST" and not c[1].startswith(("setting/all", "xray/", "server/"))]
     assert writes == []
 

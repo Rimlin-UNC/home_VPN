@@ -154,8 +154,13 @@ def provision(
         restart_panel(xui)
         res.panel_restarted = True
         console.ok("панель перезапущена (новые параметры подписки)")
-    xui.restart_xray()
-    console.ok("Xray перезапущен с актуальной конфигурацией")
+    # Пользователей 3x-ui применяет на лету; перезапуск ядра (обрыв всех соединений) —
+    # только если менялись инбаунды, шаблон Xray или сертификат.
+    if res.created_inbounds or res.updated_inbounds or res.template_changed or cert.changed:
+        xui.restart_xray()
+        console.ok("Xray перезапущен с актуальной конфигурацией")
+    else:
+        console.ok("конфигурация Xray не менялась — перезапуск не нужен")
     return res
 
 

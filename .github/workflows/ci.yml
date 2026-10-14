@@ -105,6 +105,30 @@ jobs:
             sudo stealthnode restore "$f"
             sudo stealthnode doctor --e2e
           } 2>&1 | tee /tmp/ci/6-backup.log
+      - name: SSH — нестандартный порт, только ключи, закрытие 22 (ssh.socket в Ubuntu 24.04)
+        run: |
+          {
+            set -x
+            command -v sshd || sudo apt-get install -y -q openssh-server
+            sudo ssh-keygen -A
+            ssh-keygen -q -t ed25519 -N '' -f /tmp/k
+            sudo install -d -m 700 /root/.ssh
+            sudo install -m 600 /tmp/k.pub /root/.ssh/authorized_keys
+            sudo bash stealthnode/install.sh --skip-upgrade --no-auto-reboot --no-doctor --ssh-port 2222 --ssh-keys-only
+            sudo ss -Hltn | grep -E ':(22|2222)\b'
+            sudo sshd -T | grep -E '^(port|passwordauthentication|permitrootlogin|kbdinteractiveauthentication) '
+            ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i /tmp/k -p 2222 root@127.0.0.1 true
+            ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i /tmp/k -p 22 root@127.0.0.1 true
+            sudo sshd -T | grep -qx 'passwordauthentication no'
+            sudo sshd -T | grep -qx 'permitrootlogin without-password'
+            sudo bash stealthnode/install.sh --skip-upgrade --no-auto-reboot --no-doctor --ssh-close-22
+            sudo ss -Hltn | grep -E ':2222\b'
+            ! sudo ss -Hltn | grep -E ':22\b'
+            ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i /tmp/k -p 2222 root@127.0.0.1 true
+            ! sudo ufw status | grep -E '^22/tcp'
+            sudo fail2ban-client get sshd actions
+            sudo stealthnode doctor
+          } 2>&1 | tee /tmp/ci/7-ssh.log
       - name: Отчёт (аннотации)
         if: always()
         run: |
@@ -113,6 +137,7 @@ jobs:
             [ -s "$f" ] && bash tests/ci/annotate.sh notice "$(basename "$f")" "$f" 60 120
           done
           [ -s /tmp/ci/5-reinstall.log ] && bash tests/ci/annotate.sh notice 5-reinstall.log /tmp/ci/5-reinstall.log 60 60
+          [ -s /tmp/ci/7-ssh.log ] && bash tests/ci/annotate.sh warning 7-ssh.log /tmp/ci/7-ssh.log 60 180
           [ -s /tmp/ci/1-install.log ] && grep -E '^\[|^==>' /tmp/ci/1-install.log > /tmp/ci/1-install-summary.log && \
             bash tests/ci/annotate.sh notice 1-install-summary.log /tmp/ci/1-install-summary.log 60 120
       - name: Диагностика при ошибке
