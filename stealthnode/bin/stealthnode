@@ -2,4 +2,7 @@
 # StealthNode CLI: обёртка над Python-пакетом (только стандартная библиотека).
 set -euo pipefail
 export PYTHONPATH="${SN_APP_DIR:-/opt/stealthnode/app}/python${PYTHONPATH:+:${PYTHONPATH}}"
+# Не писать __pycache__ в каталог приложения: иначе запуск по таймеру во время обновления
+# (install.sh заменяет каталог) приводил к гонке «rm: Directory not empty».
+export PYTHONDONTWRITEBYTECODE=1
 exec /usr/bin/env python3 -m stealthnode "$@"

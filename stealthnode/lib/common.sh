@@ -156,8 +156,34 @@ sshd_cmd() {
 }
 
 # Вызов CLI StealthNode из установленного приложения.
+# Заменить каталог DST копией SRC атомарно: версия кладётся рядом (DST.<метка>), а DST — символьная
+# ссылка, которую подменяет один rename(2). Процессы, пишущие в DST во время обновления (CLI по
+# таймеру, байткод Python), всегда видят целую старую или целую новую версию — путь не пропадает.
+replace_dir() {
+    local src=$1 dst=$2 stamp new link old _try
+    stamp="$(date +%Y%m%d%H%M%S).$$.${RANDOM}"
+    new="${dst}.${stamp}"
+    cp -a "${src}" "${new}"
+    find "${new}" -name '__pycache__' -type d -prune -exec rm -rf {} +
+    link="${dst}.link.${stamp}"
+    ln -s "${new##*/}" "${link}"
+    for _try in 1 2 3 4 5; do
+        # Переход со старой схемы (DST — обычный каталог) или каталог, только что созданный писателем.
+        if [[ -d ${dst} && ! -L ${dst} ]]; then
+            mv "${dst}" "${dst}.legacy.${stamp}.${_try}" 2> /dev/null || true
+        fi
+        mv -T "${link}" "${dst}" 2> /dev/null && break
+    done
+    [[ -L ${dst} && $(readlink "${dst}") == "${new##*/}" ]] || die "не удалось обновить ${dst}"
+    # Прежние версии больше не нужны (если в них ещё пишут — удалятся при следующем запуске).
+    for old in "${dst}".*; do
+        [[ ${old} == "${new}" ]] && continue
+        rm -rf "${old}" 2> /dev/null || warn "не удалось удалить ${old} (удалится при следующем запуске)"
+    done
+}
+
 sn_cli() {
-    PYTHONPATH="${SN_APP_DIR}/python" python3 -m stealthnode "$@"
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SN_APP_DIR}/python" python3 -m stealthnode "$@"
 }
 
 # Подгрузить /opt/stealthnode/.env в текущий shell (значения в одинарных кавычках).

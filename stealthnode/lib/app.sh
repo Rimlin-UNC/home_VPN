@@ -6,13 +6,12 @@ install_app() {
     install -d -m 700 "${SN_ROOT}" "${SN_ROOT}/users" "${SN_ROOT}/backups" "${SN_ROOT}/xray" "${SN_ROOT}/xray/share" \
         "${SN_ROOT}/hysteria" "${SN_ROOT}/caddy"
     install -d -m 755 "${SN_APP_DIR}"
-    rm -rf "${SN_APP_DIR}/python.new"
-    cp -a "${SN_SRC}/python" "${SN_APP_DIR}/python.new"
-    find "${SN_APP_DIR}/python.new" -name '__pycache__' -type d -prune -exec rm -rf {} +
-    rm -rf "${SN_APP_DIR}/python"
-    mv "${SN_APP_DIR}/python.new" "${SN_APP_DIR}/python"
-    rm -rf "${SN_APP_DIR}/templates"
-    cp -a "${SN_SRC}/templates" "${SN_APP_DIR}/templates"
+    # Плановые задачи StealthNode на время обновления останавливаем (setup_timers включит их снова):
+    # иначе запуск по таймеру мог писать в каталог приложения, пока он заменяется.
+    systemctl stop stealthnode-backup.timer stealthnode-certsync.timer \
+        stealthnode-backup.service stealthnode-certsync.service > /dev/null 2>&1 || true
+    replace_dir "${SN_SRC}/python" "${SN_APP_DIR}/python"
+    replace_dir "${SN_SRC}/templates" "${SN_APP_DIR}/templates"
     install -m 644 "${SN_SRC}/versions.env" "${SN_APP_DIR}/versions.env"
     install -m 644 "${SN_SRC}/../VERSION" "${SN_ROOT}/VERSION"
     install -m 755 "${SN_SRC}/bin/stealthnode" /usr/local/sbin/stealthnode

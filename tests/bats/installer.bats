@@ -10,6 +10,9 @@ setup() {
 }
 
 teardown() {
+    if [[ -n ${WRITER:-} ]]; then
+        kill "${WRITER}" 2> /dev/null || true
+    fi
     rm -rf "${TMP}"
 }
 
@@ -172,4 +175,37 @@ panel_stubs() {
     [[ ${output} == *"на разных серверах"* ]]
     run bash "${REPO}/stealthnode/install.sh" --help
     [[ ${output} == *"--exit-link"* && ${output} == *"--exit-for"* && ${output} == *"--no-ru-direct"* ]]
+}
+
+@test "replace_dir: переход со старой схемы (обычный каталог) на атомарную замену" {
+    mkdir -p "${TMP}/src/pkg" "${TMP}/dst/pkg/__pycache__"
+    echo new > "${TMP}/src/pkg/mod.py"
+    echo old > "${TMP}/dst/pkg/mod.py"
+    : > "${TMP}/dst/pkg/__pycache__/stale.pyc"
+    replace_dir "${TMP}/src" "${TMP}/dst"
+    [ -L "${TMP}/dst" ]
+    [ "$(cat "${TMP}/dst/pkg/mod.py")" = new ]
+    run bash -c "ls -d '${TMP}'/dst.* | wc -l"
+    [ "${output}" -eq 1 ]
+}
+
+@test "replace_dir: замена не срывается, пока в каталог пишут (CLI по таймеру во время обновления)" {
+    mkdir -p "${TMP}/src/pkg"
+    echo v1 > "${TMP}/src/pkg/mod.py"
+    replace_dir "${TMP}/src" "${TMP}/dst"
+    # «CLI по таймеру»: непрерывно пишет байткод (mkdir -p, как Python) в заменяемый каталог.
+    (
+        set +e
+        while :; do
+            { mkdir -p "${TMP}/dst/pkg/__pycache__" && : > "${TMP}/dst/pkg/__pycache__/x${RANDOM}.pyc"; } 2> /dev/null
+        done
+    ) > /dev/null 2>&1 &
+    WRITER=$!
+    local i
+    for i in $(seq 1 25); do
+        echo "v${i}" > "${TMP}/src/pkg/mod.py"
+        replace_dir "${TMP}/src" "${TMP}/dst"
+        [ "$(cat "${TMP}/dst/pkg/mod.py")" = "v${i}" ]
+    done
+    kill -0 "${WRITER}" # писатель всё это время работал
 }
