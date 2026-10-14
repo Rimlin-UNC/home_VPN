@@ -77,9 +77,12 @@ jobs:
         run: sudo python3 tests/ci/contract_check.py 2>&1 | tee /tmp/ci/3-contract.log
       - name: Фильтр fail2ban для панели (fail2ban-regex)
         run: |
-          out=$(fail2ban-regex -o '<ip>' tests/data/3xui-failed-login.log /etc/fail2ban/filter.d/stealthnode-panel.conf)
-          echo "$out"
-          [ "$(printf '%s\n' "$out" | sort | tr '\n' ' ')" = "2001:db8::5 203.0.113.7 203.0.113.8 " ]
+          fail2ban-regex tests/data/3xui-failed-login.log /etc/fail2ban/filter.d/stealthnode-panel.conf 2>&1 | tee /tmp/ci/3a-f2b.log
+          grep -q 'Lines: 5 lines, 0 ignored, 3 matched, 2 missed' /tmp/ci/3a-f2b.log
+          ips=$(fail2ban-regex -o '<ip>' tests/data/3xui-failed-login.log /etc/fail2ban/filter.d/stealthnode-panel.conf 2>/dev/null \
+            | grep -E '^[0-9a-f.:]+$' | sort | tr '\n' ' ')
+          echo "IP: ${ips}" | tee -a /tmp/ci/3a-f2b.log
+          [ "${ips}" = "2001:db8::5 203.0.113.7 203.0.113.8 " ]
       - name: Время ответа DNS (dnscrypt-proxy)
         run: |
           for q in www.gstatic.com www.wikipedia.org; do
@@ -140,7 +143,7 @@ jobs:
         if: always()
         run: |
           set +e
-          for f in /tmp/ci/2-doctor.log /tmp/ci/3-contract.log /tmp/ci/3b-dns.log; do
+          for f in /tmp/ci/2-doctor.log /tmp/ci/3-contract.log /tmp/ci/3a-f2b.log /tmp/ci/3b-dns.log; do
             [ -s "$f" ] && bash tests/ci/annotate.sh notice "$(basename "$f")" "$f" 60 120
           done
           [ -s /tmp/ci/5-reinstall.log ] && bash tests/ci/annotate.sh notice 5-reinstall.log /tmp/ci/5-reinstall.log 60 60
