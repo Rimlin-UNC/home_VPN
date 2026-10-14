@@ -46,18 +46,28 @@ configure_caddy() {
     render_template "${SN_SRC}/templates/Caddyfile.tmpl" "${SN_ROOT}/caddy/Caddyfile" 600 \
         SN_DOMAIN SN_PANEL_PORT SN_PANEL_PATH SN_SUB_PATH SN_XUI_PORT SN_SUB_PORT SN_CADDY_TLS SN_CADDY_GLOBAL_EMAIL
     caddy fmt --overwrite "${SN_ROOT}/caddy/Caddyfile" > /dev/null 2>&1 || true
-    caddy validate --adapter caddyfile --config "${SN_ROOT}/caddy/Caddyfile" > /dev/null 2>&1 ||
-        die "Caddyfile не прошёл проверку: caddy validate --config ${SN_ROOT}/caddy/Caddyfile"
     # Caddy работает от пользователя caddy и читает /etc/caddy (каталог /opt/stealthnode закрыт: 700).
-    install -d -m 755 /var/log/caddy
-    chown caddy:caddy /var/log/caddy 2> /dev/null || true
-    install -m 644 "${SN_ROOT}/caddy/Caddyfile" /etc/caddy/Caddyfile
+    # Проверяем конфиг тоже от caddy: `caddy validate` открывает файлы журнала, и запуск от root
+    # оставил бы /var/log/caddy/caddy.log недоступным для службы.
+    install -d -m 755 -o caddy -g caddy /var/log/caddy
+    chown -R caddy:caddy /var/log/caddy
+    install -m 644 "${SN_ROOT}/caddy/Caddyfile" /etc/caddy/Caddyfile.new
+    if ! runuser -u caddy -- caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new > /tmp/caddy-validate.log 2>&1; then
+        cat /tmp/caddy-validate.log >&2
+        rm -f /etc/caddy/Caddyfile.new
+        die "Caddyfile не прошёл проверку (caddy validate), см. вывод выше"
+    fi
+    rm -f /tmp/caddy-validate.log
+    chown -R caddy:caddy /var/log/caddy
+    mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
     systemctl enable caddy > /dev/null 2>&1
     if systemctl is-active --quiet caddy; then
         systemctl reload caddy || systemctl restart caddy
     else
         systemctl restart caddy
     fi
+    sleep 1
+    systemctl is-active --quiet caddy || die "Caddy не запустился: journalctl -u caddy --no-pager | tail -n 30"
     ok "Caddy: https://${SN_DOMAIN}:${SN_PANEL_PORT}/ → панель и подписка"
 }
 

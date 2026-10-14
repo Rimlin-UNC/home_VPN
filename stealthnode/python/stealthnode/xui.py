@@ -154,6 +154,9 @@ class XuiClient:
     # --- шаблон Xray ------------------------------------------------------
     def get_xray_template(self) -> dict:
         obj = self.call("POST", "xray/") or {}
+        # 3x-ui v3 отдаёт obj как JSON-строку: {"xraySetting": {...}, "inboundTags": [...], ...}
+        if isinstance(obj, str):
+            obj = json.loads(obj)
         tpl = obj.get("xraySetting") if isinstance(obj, dict) else None
         if isinstance(tpl, str):
             tpl = json.loads(tpl)

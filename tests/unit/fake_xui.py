@@ -261,7 +261,8 @@ def make_handler(state: FakeXuiState, base: str):
                 s.settings = copy.deepcopy(body)
                 return self._send(None)
             if rel == "xray/":
-                return self._send({"xraySetting": copy.deepcopy(s.template), "inboundTags": []})
+                # Как в 3x-ui v3.10.0: obj — JSON-строка с объектом внутри.
+                return self._send(json.dumps({"xraySetting": s.template, "inboundTags": []}))
             if rel == "xray/update":
                 s.template = json.loads(body["xraySetting"])
                 return self._send(None)

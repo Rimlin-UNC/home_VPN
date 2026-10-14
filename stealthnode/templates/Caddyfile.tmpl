@@ -7,6 +7,8 @@
 {
 	${SN_CADDY_GLOBAL_EMAIL}
 	auto_https disable_redirects
+	# Не пытаться ставить корневой сертификат внутреннего CA в систему (нужно только для tls internal).
+	skip_install_trust
 	servers {
 		protocols h1 h2
 	}
