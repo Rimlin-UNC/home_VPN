@@ -49,8 +49,8 @@ stealthnode user del limittest --yes
 | `tests/unit` (pytest, 40+) | X25519 по векторам RFC 7748; формат `.env` (совместимость с bash); генерация параметров и идемпотентность; JSON инбаундов (stream-one, firefox, без sc*-полей, salamander, pin); клиенты (байты, ежемесячный сброс); разбор и аудит ссылок; провижининг, исправление дрейфа, конфликты портов, пользователи, cert-sync, бэкап/восстановление (в т.ч. защита от path traversal) — против фейкового API 3x-ui | `python -m pytest tests/unit` |
 | `tests/bats` | функции установщика: шаблоны (буквальная подстановка), повторы, валидация параметров, `--help` | `bats tests/bats` |
 | `tests/e2e` | **настоящий Xray 26.10.10** (сервер и клиент) + официальный клиент **Hysteria 2.13**: все три профиля; self-signed+pin и CA-режим; отказ при `fp=ios` (нет MLKEM), неверном пароле obfs и shortId | `pip install xray-core==1.8.26.13 hysteria2==2.13.0` (Python 3.11), `python -m pytest tests/e2e` |
-| CI `e2e-install` | **полная установка на чистой Ubuntu 24.04** (GitHub Actions), `doctor --e2e --speed`, проверка контракта с настоящей 3x-ui (`tests/ci/contract_check.py`), управление пользователями, повторная установка, бэкап и восстановление | автоматически при push |
-| Линтеры | shellcheck (style), shfmt, `caddy validate` (в установщике) | CI |
+| CI `e2e-install` | **полная установка на чистой Ubuntu 24.04** (GitHub Actions), `doctor --e2e --speed`, проверка контракта с настоящей 3x-ui (`tests/ci/contract_check.py`), фильтр fail2ban (`fail2ban-regex`), управление пользователями, повторная установка, бэкап и восстановление, усиление SSH (порт 2222, только ключи, закрытие 22) | автоматически при push |
+| Линтеры | shellcheck (style), shfmt, ruff, `caddy validate` (в установщике) | CI, `make lint` |
 
 В CI используется `--tls internal` (у раннера нет домена) — выпуск Let's Encrypt проверяется
 только на реальном сервере (`doctor`: «сертификат панели»).
