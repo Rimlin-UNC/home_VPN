@@ -77,9 +77,9 @@ jobs:
         run: sudo python3 tests/ci/contract_check.py 2>&1 | tee /tmp/ci/3-contract.log
       - name: Фильтр fail2ban для панели (fail2ban-regex)
         run: |
-          fail2ban-regex tests/data/3xui-failed-login.log /etc/fail2ban/filter.d/stealthnode-panel.conf 2>&1 | tee /tmp/ci/3a-f2b.log
+          fail2ban-regex tests/data/3xui-failed-login.txt /etc/fail2ban/filter.d/stealthnode-panel.conf 2>&1 | tee /tmp/ci/3a-f2b.log
           grep -q 'Lines: 5 lines, 0 ignored, 3 matched, 2 missed' /tmp/ci/3a-f2b.log
-          ips=$(fail2ban-regex -o '<ip>' tests/data/3xui-failed-login.log /etc/fail2ban/filter.d/stealthnode-panel.conf 2>/dev/null \
+          ips=$(fail2ban-regex -o '<ip>' tests/data/3xui-failed-login.txt /etc/fail2ban/filter.d/stealthnode-panel.conf 2>/dev/null \
             | grep -E '^[0-9a-f.:]+$' | sort | tr '\n' ' ')
           echo "IP: ${ips}" | tee -a /tmp/ci/3a-f2b.log
           [ "${ips}" = "2001:db8::5 203.0.113.7 203.0.113.8 " ]

@@ -1,0 +1,5 @@
+2026/10/14 12:34:56 WARNING - failed login: username="admin", IP="203.0.113.7", reason="wrong username or password"
+2026/10/14 12:34:57 WARNING - failed login: username="x\", IP=\"9.9.9.9\", reason=\"", IP="203.0.113.8", reason="wrong username or password"
+2026/10/14 12:34:58 WARNING - failed login: username="root", IP="2001:db8::5", reason="too many failed attempts", blocked_until=2026-10-14T12:49:58Z
+2026/10/14 12:35:00 INFO - successful login: username="sn123", IP="198.51.100.1"
+2026/10/14 12:35:01 INFO - Sub server running HTTP on 127.0.0.1:2096
