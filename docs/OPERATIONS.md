@@ -81,6 +81,24 @@ sudo stealthnode panel-password --check         # действует ли пар
 `--ssh-keys-only` вход по паролю отключён намеренно — входите по ключу; пароль root нужен только
 для консоли хостинга.
 
+## Связка «российский мост → зарубежный выход»
+
+Подробно — [RELAY.md](RELAY.md).
+
+```bash
+# на зарубежном сервере (выход)
+sudo stealthnode exit enable 31.59.126.178   # инбаунд для моста, UFW только для него, ссылка + архив
+sudo stealthnode exit link                   # ссылка выхода (секрет) для --exit-link / bridge set
+sudo stealthnode exit status                 # инбаунд, правило UFW, трафик моста
+sudo stealthnode exit disable
+# на российском сервере (мост)
+sudo stealthnode bridge status               # доступен ли выход, маскировка REALITY на выходе
+sudo stealthnode bridge set 'vless://…'      # сменить выход (сначала проверяет его доступность)
+sudo stealthnode bridge off                  # выключить связку (трафик пойдёт с самого моста)
+```
+
+Пользователей на схеме с мостом заводят **на мосту**: там панель, лимиты и подписки.
+
 ## Резервные копии
 
 - Автоматически каждый день около 03:15 (таймер `stealthnode-backup.timer`), хранится 14 архивов

@@ -64,6 +64,15 @@ StealthNode ${SN_VERSION} — установка личного VPN (3X-UI + Xra
   --ssh-close-22          закрыть порт 22 (после проверки входа по новому порту)
   --admin-ip IP[,IP]      не банить эти IP/подсети в fail2ban (запоминается)
 
+Связка «мост в РФ → выход за рубежом» (если из РФ зарубежный сервер недоступен; docs/RELAY.md):
+  --exit-for IP           (на зарубежном сервере) принимать трафик российского моста с этого IP
+  --exit-link 'vless://…' (на российском сервере) работать мостом: трафик уходит на выход по ссылке
+                          из «stealthnode exit link»; вместе с --restore <архив выхода>
+  --no-ru-direct          (на мосту) российские сайты тоже через выход (по умолчанию — напрямую)
+  --proxy URL             загрузки по HTTPS (GitHub, Caddy) через прокси, если с сервера в РФ они
+                          недоступны; напр. SSH-туннель к выходу: ssh -fN -D 1080 root@<IP выхода>
+                          и --proxy socks5h://127.0.0.1:1080 (внешний IP определяется напрямую)
+
 Прочее:
   --panel-port N          внешний порт панели (по умолчанию случайный 20000-29999)
   --hy2-port N            UDP-порт Hysteria2 (443)
@@ -126,6 +135,19 @@ parse_args() {
                 OPT_ADMIN_IP=${2:?}
                 shift
                 ;;
+            --exit-for)
+                OPT_EXIT_FOR=${2:?}
+                shift
+                ;;
+            --exit-link)
+                OPT_EXIT_LINK=${2:?}
+                shift
+                ;;
+            --no-ru-direct) OPT_NO_RU_DIRECT=1 ;;
+            --proxy)
+                OPT_PROXY=${2:?}
+                shift
+                ;;
             --panel-port)
                 OPT_PANEL_PORT=${2:?}
                 shift
@@ -184,7 +206,24 @@ parse_args() {
         die "--tg-token и --tg-chat задаются вместе"
     fi
     [[ -z ${OPT_RESTORE:-} || -f ${OPT_RESTORE} ]] || die "--restore: файл не найден"
+    [[ -z ${OPT_EXIT_FOR:-} || ${OPT_EXIT_FOR} =~ ^[0-9a-fA-F.:]+$ ]] || die "--exit-for: ожидается IP-адрес моста"
+    [[ -z ${OPT_EXIT_LINK:-} || ${OPT_EXIT_LINK} == vless://* ]] ||
+        die "--exit-link: ожидается ссылка vless://… (на выходе: stealthnode exit link)"
+    if [[ -n ${OPT_EXIT_FOR:-} && -n ${OPT_EXIT_LINK:-} ]]; then
+        die "--exit-for (выход) и --exit-link (мост) задаются на разных серверах"
+    fi
+    [[ -z ${OPT_PROXY:-} || ${OPT_PROXY} =~ ^(socks5h?|https?)://[^[:space:]]+$ ]] ||
+        die "--proxy: ожидается socks5h://хост:порт или http://хост:порт"
     return 0
+}
+
+# Прокси только для загрузок по HTTPS (GitHub, Caddy) в этом процессе и в установщике 3x-ui.
+# apt по http (зеркала Ubuntu) идёт напрямую; локальные адреса — всегда напрямую.
+use_proxy() {
+    [[ -n ${OPT_PROXY:-} ]] || return 0
+    export https_proxy=${OPT_PROXY} HTTPS_PROXY=${OPT_PROXY}
+    export no_proxy="localhost,127.0.0.1,::1" NO_PROXY="localhost,127.0.0.1,::1"
+    info "загрузки по HTTPS — через прокси ${OPT_PROXY}"
 }
 
 run_doctor_final() {
@@ -200,6 +239,7 @@ main() {
     setup_logging
     enable_error_trap
     info "StealthNode ${SN_VERSION}: домен ${SN_DOMAIN_ARG}, 3x-ui ${XUI_VERSION}"
+    use_proxy
     SN_TLS_MODE=${OPT_TLS_MODE:-acme}
 
     step "Предварительные проверки" preflight

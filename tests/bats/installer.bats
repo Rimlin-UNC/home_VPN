@@ -157,3 +157,19 @@ panel_stubs() {
     [ "${#lines[@]}" -eq 4 ]
     [ "${lines[0]}" = "setting -username snowner -password p@ss w0rd" ]
 }
+
+# --- связка «мост в РФ → выход за рубежом» ---
+
+@test "install.sh: параметры связки проверяются до любых изменений" {
+    run bash "${REPO}/stealthnode/install.sh" --exit-for not-an-ip
+    [ "${status}" -ne 0 ]
+    [[ ${output} == *"--exit-for"* ]]
+    run bash "${REPO}/stealthnode/install.sh" --exit-link 'https://example.com/'
+    [ "${status}" -ne 0 ]
+    [[ ${output} == *"vless://"* ]]
+    run bash "${REPO}/stealthnode/install.sh" --exit-for 31.59.126.178 --exit-link 'vless://u@95.182.99.147:40001'
+    [ "${status}" -ne 0 ]
+    [[ ${output} == *"на разных серверах"* ]]
+    run bash "${REPO}/stealthnode/install.sh" --help
+    [[ ${output} == *"--exit-link"* && ${output} == *"--exit-for"* && ${output} == *"--no-ru-direct"* ]]
+}

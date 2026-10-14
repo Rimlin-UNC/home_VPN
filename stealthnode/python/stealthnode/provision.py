@@ -11,7 +11,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 
-from . import certs, config, users
+from . import certs, chain, config, users
 from .config import ALL_TAGS, Settings
 from .payloads import apply_settings_patch, desired_inbounds, inbound_diff, merge_inbound_for_update, patch_xray_template, settings_patch
 from .util import Console, atomic_write
@@ -86,7 +86,13 @@ def provision(
 
     # 1. Общие настройки панели (подписка за Caddy, часовой пояс, язык бота).
     current = xui.get_settings()
-    new_settings, changed = apply_settings_patch(current, settings_patch(s))
+    patch = settings_patch(s)
+    # Мост: собственный трафик панели (Telegram-бот, проверки версий) — через выход.
+    if s.is_bridge:
+        patch["panelOutbound"] = chain.TAG_EXIT
+    elif current.get("panelOutbound") == chain.TAG_EXIT:
+        patch["panelOutbound"] = ""
+    new_settings, changed = apply_settings_patch(current, patch)
     if changed:
         xui.update_settings(new_settings)
         res.settings_changed = changed
@@ -94,13 +100,17 @@ def provision(
     else:
         console.ok("настройки панели уже актуальны")
 
-    # 2. Шаблон Xray: DNS через dnscrypt-proxy, стратегия freedom.
+    # 2. Шаблон Xray: DNS через dnscrypt-proxy, стратегия freedom, роль в связке «мост → выход».
     tpl = xui.get_xray_template()
     new_tpl, tpl_changed = patch_xray_template(tpl, s)
     if tpl_changed:
         xui.update_xray_template(new_tpl)
         res.template_changed = True
-        console.ok("шаблон Xray обновлён (DNS → dnscrypt-proxy, резерв DoH)")
+        if s.is_bridge:
+            console.ok("шаблон Xray обновлён: мост — трафик идёт на выход"
+                       + (", российские сайты напрямую" if s.ru_direct else ""))
+        else:
+            console.ok("шаблон Xray обновлён (DNS → dnscrypt-proxy, резерв DoH)")
 
     # 3. Сертификат Hysteria2.
     cert = certs.ensure_hy2_cert(s)
@@ -132,6 +142,11 @@ def provision(
             xui.update_inbound(int(cur["id"]), merge_inbound_for_update(cur, want))
             res.updated_inbounds.append(tag)
             console.ok(f"инбаунд {tag} исправлен: {', '.join(diffs)}")
+
+    # 4b. Выход для российского моста: отдельный инбаунд и учётная запись моста (или их удаление).
+    for change in chain.sync_exit_role(s, xui):
+        res.updated_inbounds.append(chain.TAG_BRIDGE_IN)
+        console.ok(change)
 
     # 5. Пользователи: владелец без лимитов + дополнительные из параметров.
     owner = s.get("SN_OWNER_NAME") or "owner"

@@ -194,3 +194,19 @@ def test_cli_env_init_and_check(sn_root, capsys):
     assert cli.main(["env", "init", "BAD=1"]) == 2
     assert cli.main(["env", "set", "SN_FINGERPRINT=ios"]) == 0
     assert cli.main(["env", "check"]) == 1
+
+
+def test_restore_no_env_keeps_merged_env(settings, tmp_path, monkeypatch):
+    """install.sh --restore: .env восстанавливается один раз (и дополняется IP/ролью нового сервера),
+    второй шаг восстановления (БД и профили) не должен затирать его архивной версией."""
+    monkeypatch.setattr(config, "XUI_DB", tmp_path / "x-ui.db")
+    monkeypatch.setattr(backup.subprocess, "run", lambda *a, **k: None)
+    archive = backup.make_backup(keep=3, settings=settings)
+    s = config.load_settings()
+    s.values["SN_PUBLIC_IP"] = "31.59.126.178"  # новый сервер
+    config.save_settings(s)
+    (config.sn_root() / "users").mkdir(exist_ok=True)
+    assert cli.main(["restore", "--no-env", str(archive)]) == 0
+    assert config.load_settings().get("SN_PUBLIC_IP") == "31.59.126.178"
+    assert cli.main(["restore", str(archive)]) == 0  # полное восстановление по-прежнему возвращает .env
+    assert config.load_settings().get("SN_PUBLIC_IP") == settings.get("SN_PUBLIC_IP")

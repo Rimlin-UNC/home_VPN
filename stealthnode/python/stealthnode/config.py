@@ -68,7 +68,10 @@ PANEL_PASSWORD_RECOMMENDED = 12
 TAG_XHTTP = "sn-vless-xhttp"
 TAG_VISION = "sn-vless-vision"
 TAG_HY2 = "sn-hysteria2"
+# Профили пользователей. Инбаунд выхода для моста (chain.TAG_BRIDGE_IN) сюда не входит:
+# пользователи к нему не привязываются и в подписку он не попадает.
 ALL_TAGS = (TAG_XHTTP, TAG_VISION, TAG_HY2)
+EXIT_PORT_RANGE = (40000, 49999)
 
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)([a-z0-9-]{1,63}(?<!-)\.)+[a-z]{2,63}$")
 _PATH_RE = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
@@ -139,6 +142,11 @@ ENV_ORDER = [
     "SN_SUB_PATH",
     "SN_SSH_PORT",
     "SN_ADMIN_IP",
+    "SN_EXIT_BRIDGE_IP",
+    "SN_EXIT_PORT",
+    "SN_EXIT_PATH",
+    "SN_BRIDGE_EXIT_LINK",
+    "SN_BRIDGE_RU_DIRECT",
     "SN_FREEDOM_STRATEGY",
     "SN_TIMEZONE",
     "SN_DEFAULT_LIMIT_GB",
@@ -178,6 +186,20 @@ class Settings:
         return f"https://{self.domain}:{self.get('SN_PANEL_PORT')}/{self.get('SN_SUB_PATH')}/"
 
     @property
+    def is_exit(self) -> bool:
+        """Зарубежный «выход»: принимает трафик российского моста (SN_EXIT_BRIDGE_IP)."""
+        return bool(self.get("SN_EXIT_BRIDGE_IP"))
+
+    @property
+    def is_bridge(self) -> bool:
+        """Российский «мост»: клиенты подключаются сюда, трафик уходит на выход (SN_BRIDGE_EXIT_LINK)."""
+        return bool(self.get("SN_BRIDGE_EXIT_LINK"))
+
+    @property
+    def ru_direct(self) -> bool:
+        return self.get("SN_BRIDGE_RU_DIRECT", "1") != "0"
+
+    @property
     def xui_api_base(self) -> str:
         """Внутренний адрес API панели (только 127.0.0.1)."""
         return f"http://127.0.0.1:{self.get('SN_XUI_PORT')}/{self.get('SN_PANEL_PATH')}"
@@ -215,6 +237,7 @@ class Settings:
                 ipaddress.ip_network(item, strict=False)
             except ValueError:
                 errors.append(f"SN_ADMIN_IP: некорректный IP или подсеть {item!r}")
+        errors.extend(self._chain_errors())
         if self.get("SN_TLS_MODE") not in ("acme", "internal"):
             errors.append("SN_TLS_MODE: допустимо acme или internal")
         if self.get("SN_FINGERPRINT") not in REALITY_CAPABLE_FINGERPRINTS:
@@ -233,6 +256,37 @@ class Settings:
                 errors.append("SN_REALITY_PUBLIC_KEY не соответствует приватному ключу")
         except Exception:  # noqa: BLE001 - любой мусор в ключе = ошибка конфигурации
             errors.append("SN_REALITY_PRIVATE_KEY: некорректный ключ")
+        return errors
+
+    def _chain_errors(self) -> list[str]:
+        """Проверка параметров связки «мост → выход» (см. chain.py, docs/RELAY.md)."""
+        errors = []
+        if self.is_exit:
+            try:
+                ipaddress.ip_address(self.get("SN_EXIT_BRIDGE_IP"))
+            except ValueError:
+                errors.append(f"SN_EXIT_BRIDGE_IP: ожидается IP-адрес моста, получено {self.get('SN_EXIT_BRIDGE_IP')!r}")
+            port = self.get("SN_EXIT_PORT")
+            if not port.isdigit() or not 1 <= int(port) <= 65535:
+                errors.append("SN_EXIT_PORT: порт вне диапазона 1-65535")
+            elif port in {self.get(k) for k in ("SN_XHTTP_PORT", "SN_VISION_PORT", "SN_PANEL_PORT", "SN_XUI_PORT",
+                                                  "SN_SUB_PORT")}:
+                errors.append(f"SN_EXIT_PORT: порт {port} уже занят другим профилем StealthNode")
+            if not _PATH_RE.match(self.get("SN_EXIT_PATH")):
+                errors.append("SN_EXIT_PATH: ожидается 6-64 символов [A-Za-z0-9_-]")
+        if self.is_bridge:
+            from . import links  # локальный импорт: links не зависит от config
+
+            try:
+                link = links.parse(self.get("SN_BRIDGE_EXIT_LINK"))
+                if link.scheme != "vless" or link.params.get("security") != "reality":
+                    raise links.LinkError("нужна ссылка vless:// с security=reality (stealthnode exit link на выходе)")
+                if link.params.get("type", "tcp") not in ("xhttp", "tcp", "raw"):
+                    raise links.LinkError(f"неподдерживаемый транспорт {link.params.get('type')!r}")
+                if link.host in (self.domain, self.get("SN_PUBLIC_IP")):
+                    raise links.LinkError("ссылка выхода указывает на этот же сервер")
+            except links.LinkError as exc:
+                errors.append(f"SN_BRIDGE_EXIT_LINK: {exc}")
         return errors
 
     def warnings(self) -> list[str]:
@@ -306,6 +360,11 @@ def fill_defaults(values: dict[str, str], version: str) -> dict[str, str]:
     setdefault("SN_OWNER_NAME", "owner")
     setdefault("SN_PUBLIC_IP", "")
     setdefault("SN_ACME_EMAIL", "")
+    if v.get("SN_EXIT_BRIDGE_IP"):
+        # Порт и путь инбаунда выхода — только когда сервер служит выходом для моста.
+        used.update(int(v[k]) for k in ("SN_XUI_PORT", "SN_SUB_PORT") if v.get(k, "").isdigit())
+        setdefault("SN_EXIT_PORT", lambda: str(pick_port(*EXIT_PORT_RANGE, used)))
+        setdefault("SN_EXIT_PATH", lambda: rand_str(16, LOWER_ALNUM))
     ordered = {k: v[k] for k in ENV_ORDER if k in v}
     ordered.update({k: val for k, val in v.items() if k not in ordered})
     return ordered

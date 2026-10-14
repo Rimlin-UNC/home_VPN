@@ -35,6 +35,12 @@ setup_ufw() {
     ufw_allow "${SN_VISION_PORT}/tcp" "StealthNode VLESS TCP REALITY Vision"
     ufw_allow "${SN_HY2_PORT}/udp" "StealthNode Hysteria2"
     ufw_allow "${SN_PANEL_PORT}/tcp" "StealthNode panel HTTPS (Caddy)"
+    # Выход для российского моста: порт открыт ТОЛЬКО для IP моста (сканеры его не видят).
+    if [[ -n ${SN_EXIT_BRIDGE_IP:-} && -n ${SN_EXIT_PORT:-} ]]; then
+        ufw allow proto tcp from "${SN_EXIT_BRIDGE_IP}" to any port "${SN_EXIT_PORT}" \
+            comment "StealthNode exit for bridge" > /dev/null
+        info "UFW: порт выхода ${SN_EXIT_PORT}/tcp — только для моста ${SN_EXIT_BRIDGE_IP}"
+    fi
     ufw --force enable > /dev/null
     ufw reload > /dev/null
     ok "UFW: открыты SSH, 80/tcp, ${SN_XHTTP_PORT}/tcp, ${SN_VISION_PORT}/tcp, ${SN_HY2_PORT}/udp, ${SN_PANEL_PORT}/tcp"

@@ -205,8 +205,17 @@ def make_handler(state: FakeXuiState, base: str):
                 new["id"] = inb["id"]
                 s.inbounds[s.inbounds.index(inb)] = new
                 return self._send(copy.deepcopy(new))
+            if parts[:2] == ["inbounds", "del"]:
+                inb = s.inbound(int(parts[2]))
+                s.inbounds.remove(inb)
+                for c in s.clients.values():
+                    c["inboundIds"] = [i for i in c["inboundIds"] if i != inb["id"]]
+                return self._send(int(parts[2]))
             if rel == "clients/list":
                 return self._send([s.client_row(e) for e in s.clients])
+            if parts[:2] == ["clients", "traffic"]:
+                s.clients[parts[2]]
+                return self._send({"email": parts[2], "up": 1024, "down": 4096, "enable": True})
             if parts[:2] == ["clients", "get"]:
                 email = parts[2]
                 row = s.client_row(email)

@@ -52,6 +52,8 @@ sudo stealthnode backup                # резервная копия (ещё �
 sudo stealthnode sni-check             # подобрать SNI для REALITY с этого сервера
 sudo stealthnode panel-password        # сменить/восстановить пароль панели, снять блокировки входа
 sudo stealthnode unban                 # баны fail2ban (снять: unban <IP>)
+sudo stealthnode exit enable <IP моста>  # зарубежный сервер — выход для российского моста (docs/RELAY.md)
+sudo stealthnode bridge status         # российский мост: доступен ли выход
 ```
 
 Все команды: [docs/OPERATIONS.md](docs/OPERATIONS.md).
@@ -61,6 +63,7 @@ sudo stealthnode unban                 # баны fail2ban (снять: unban <I
 | Документ | Содержание |
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | установка по шагам, параметры, переезд, частые проблемы |
+| [docs/RELAY.md](docs/RELAY.md) | **связка: российский мост → зарубежный выход** (если из РФ сервер недоступен) |
 | [docs/CLIENTS.md](docs/CLIENTS.md) | приложения для iOS/Android/Windows/macOS и совместимость |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | пользователи, лимиты, бэкапы, обновления, журналы |
 | [docs/SECURITY.md](docs/SECURITY.md) | модель угроз и что защищено |
@@ -74,8 +77,10 @@ sudo stealthnode unban                 # баны fail2ban (снять: unban <I
 - Совместимы только клиенты на **Xray-core ≥ 26.3.23** (v2rayNG, v2rayN, Happ, Streisand/V2Box):
   REALITY в Xray ≥ 26.9.8 требует X25519MLKEM768, а клиенты на sing-box (NekoBox, Hiddify,
   Nekoray/Throne, Karing) подключиться не смогут. См. [CLIENTS.md](docs/CLIENTS.md).
-- Режим «белых списков» мобильных операторов один зарубежный сервер не обходит — нужен
-  российский relay (следующая фаза, см. [PLAN.md](PLAN.md)).
+- Если из России зарубежный сервер недоступен (с 2026 года ТСПУ «замораживает» прямые сессии к
+  зарубежным хостингам), используйте **связку**: российский сервер-мост → зарубежный выход —
+  [docs/RELAY.md](docs/RELAY.md). Для «белых списков» мобильных операторов IP моста должен быть в
+  этих списках (обычно это крупные российские облака).
 - Домен `.ru` со словом «vpn» заметнее для блокировок (CT-логи) — домен меняется параметром `--domain`.
 
 Предыдущая версия (Docker, своя панель, торговый бот) — в [legacy/](legacy/README.md).

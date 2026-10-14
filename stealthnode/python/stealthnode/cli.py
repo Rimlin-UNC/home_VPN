@@ -17,8 +17,9 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-from . import __version__, backup, config, doctor, panelauth, provision, users
+from . import __version__, backup, chain, config, doctor, panelauth, provision, users
 from .config import Settings
 from .panelauth import PanelAuthError
 from .util import Console, atomic_write, rand_str
@@ -71,6 +72,11 @@ def cmd_env(args, console: Console) -> int:
         merged = dict(current)
         # Явно переданные параметры установщика имеют приоритет над сохранёнными.
         merged.update({k: v for k, v in overrides.items() if v != ""})
+        if merged.get("SN_EXIT_BRIDGE_IP") and merged.get("SN_EXIT_BRIDGE_IP") == merged.get("SN_PUBLIC_IP"):
+            # Архив зарубежного выхода восстановлен на сам мост: роль выхода здесь не нужна.
+            for key in ("SN_EXIT_BRIDGE_IP", "SN_EXIT_PORT", "SN_EXIT_PATH"):
+                merged.pop(key, None)
+            console.info("роль «выход» из архива снята: этот сервер — мост (его IP совпадает с IP моста)")
         filled = config.fill_defaults(merged, __version__)
         s = Settings(filled)
         errors = s.validate()
@@ -382,7 +388,9 @@ def cmd_backup(args, console: Console) -> int:
 
 
 def cmd_restore(args, console: Console) -> int:
-    env = not args.db_only
+    # --no-env: установщик уже восстановил .env и дополнил его параметрами нового сервера
+    # (IP, роль в связке) — второй раз затирать его архивной версией нельзя.
+    env = not (args.db_only or args.no_env)
     files = not (args.env_only or args.db_only)
     db = not args.env_only
     restored = backup.restore(args.archive, env=env, files=files, db=db)
@@ -549,6 +557,156 @@ def cmd_unban(args, console: Console) -> int:
     return 0
 
 
+# --- связка «мост в РФ → выход за рубежом» (docs/RELAY.md) -------------------------------------
+
+
+def _exit_link_or_die(s: Settings, xui, console: Console) -> str | None:
+    uuid = chain.bridge_client_uuid(xui)
+    if not uuid:
+        console.fail("учётной записи моста нет — сначала: stealthnode exit enable <IP моста>")
+        return None
+    return chain.exit_link(s, uuid)
+
+
+def cmd_exit(args, console: Console) -> int:
+    """Зарубежный сервер как «выход» для российского моста."""
+    s = _settings_or_die(console)
+    xui = _client(s)
+    old_ip, old_port = s.get("SN_EXIT_BRIDGE_IP"), s.get("SN_EXIT_PORT")
+    if args.action == "enable":
+        if not args.bridge_ip:
+            console.fail("укажите IP российского моста: stealthnode exit enable 31.59.126.178")
+            return 2
+        ip = panelauth.validate_ip(args.bridge_ip)
+        if ip == s.get("SN_PUBLIC_IP"):
+            console.fail("это IP самого сервера; укажите IP российского моста")
+            return 2
+        if not chain.is_public_ip(ip):
+            console.warn(f"{ip} — не публичный адрес (годится только для тестов)")
+        s.values["SN_EXIT_BRIDGE_IP"] = ip
+        if args.port:
+            s.values["SN_EXIT_PORT"] = str(args.port)
+        s.values = config.fill_defaults(s.values, __version__)
+        errors = s.validate()
+        if errors:
+            for e in errors:
+                console.fail(e)
+            return 1
+        config.save_settings(s)
+        provision.provision(s, xui, console)
+        port = s.int("SN_EXIT_PORT")
+        if old_ip and (old_ip != ip or old_port != str(port)):
+            chain.ufw_delete_bridge(old_ip, int(old_port or 0))
+        if chain.ufw_allow_bridge(ip, port):
+            console.ok(f"UFW: порт выхода {port}/tcp открыт только для моста {ip}")
+        else:
+            console.warn("ufw не найден — ограничьте порт выхода для моста вручную")
+        if chain.f2b_set_ignore(add=ip, remove=old_ip if old_ip != ip else None):
+            console.ok(f"fail2ban: мост {ip} никогда не банится")
+        link = _exit_link_or_die(s, xui, console)
+        if not link:
+            return 1
+        archive = backup.make_backup(keep=14, settings=s)
+        console.header("Выход для моста готов. Дальше (подробно — docs/RELAY.md):")
+        console.line(f"1. DNS: A-запись {s.domain} → {ip} (IP моста), TTL 300; AAAA-запись удалите.")
+        console.line(f"2. Перенесите архив на мост: scp {archive} root@{ip}:/root/")
+        console.line("3. На мосту (Ubuntu 24.04), в каталоге с репозиторием StealthNode:")
+        console.line(f"   sudo bash stealthnode/install.sh --domain {s.domain} --restore /root/{Path(archive).name} \\")
+        console.line(f"     --exit-link '{link}'")
+        console.line("4. Проверка на мосту: sudo stealthnode doctor --e2e")
+        console.warn("ссылка выхода — секрет (ключ доступа моста); показать снова: stealthnode exit link")
+        return 0
+    if args.action == "link":
+        link = _exit_link_or_die(s, xui, console)
+        if not link:
+            return 1
+        print(link)
+        return 0
+    if args.action == "status":
+        if not s.is_exit:
+            console.info("режим выхода выключен (включить: stealthnode exit enable <IP моста>)")
+            return 0
+        port = s.int("SN_EXIT_PORT")
+        console.line(f"Мост: {old_ip}, порт выхода {port}/tcp")
+        inb = chain.find_inbound(xui, chain.TAG_BRIDGE_IN)
+        (console.ok if inb else console.fail)(f"инбаунд выхода {chain.TAG_BRIDGE_IN}" + ("" if inb else " не найден"))
+        rule = chain.ufw_has_bridge_rule(old_ip, port)
+        if rule is not None:
+            (console.ok if rule else console.warn)(f"UFW: {port}/tcp только для {old_ip}" + ("" if rule else " — правила нет"))
+        traffic = xui.client_traffic(chain.BRIDGE_CLIENT) or {}
+        up, down = int(traffic.get("up", 0) or 0), int(traffic.get("down", 0) or 0)
+        console.line(f"Трафик моста: ↑ {up} Б, ↓ {down} Б")
+        return 0
+    if args.action == "disable":
+        if not s.is_exit:
+            console.info("режим выхода уже выключен")
+            return 0
+        for key in ("SN_EXIT_BRIDGE_IP", "SN_EXIT_PORT", "SN_EXIT_PATH"):
+            s.values.pop(key, None)
+        config.save_settings(s)
+        provision.provision(s, xui, console)
+        chain.ufw_delete_bridge(old_ip, int(old_port or 0))
+        chain.f2b_set_ignore(remove=old_ip)
+        console.ok(f"режим выхода выключен: инбаунд, учётная запись и правило UFW для {old_ip} удалены")
+        return 0
+    return 2
+
+
+def cmd_bridge(args, console: Console) -> int:
+    """Российский сервер как «мост»: клиенты подключаются сюда, трафик уходит на выход."""
+    s = _settings_or_die(console)
+    xui = _client(s)
+    if args.action == "set":
+        if not args.link:
+            console.fail("укажите ссылку выхода: stealthnode bridge set 'vless://…' (на выходе: stealthnode exit link)")
+            return 2
+        s.values["SN_BRIDGE_EXIT_LINK"] = args.link.strip()
+        s.values["SN_BRIDGE_RU_DIRECT"] = "0" if args.no_ru_direct else "1"
+        errors = s.validate()
+        if errors:
+            for e in errors:
+                console.fail(e)
+            return 1
+        probe = chain.probe_exit(s.get("SN_BRIDGE_EXIT_LINK"))
+        if probe.get("error"):
+            console.fail(f"выход {probe['host']}:{probe['port']} недоступен с этого сервера: {probe['error']}")
+            if not args.force:
+                console.line("Без рабочего выхода у пользователей пропадёт интернет — ничего не изменено.")
+                console.line("Проверьте IP/порт и UFW на выходе; принудительно: --force")
+                return 1
+        else:
+            console.ok(f"выход {probe['host']}:{probe['port']} доступен: TCP {probe['tcp_ms']} мс, "
+                       f"{probe.get('tls')}, маскировка CN={probe.get('cert_cn')}")
+        config.save_settings(s)
+        provision.provision(s, xui, console)
+        console.ok("мост включён: трафик пользователей идёт на выход"
+                   + (", российские сайты — напрямую" if s.ru_direct else ""))
+        console.line("Проверьте: sudo stealthnode doctor --e2e (там же — IP, с которого трафик выходит в интернет)")
+        return 0
+    if args.action == "off":
+        if not s.is_bridge:
+            console.info("режим моста уже выключен")
+            return 0
+        s.values.pop("SN_BRIDGE_EXIT_LINK", None)
+        config.save_settings(s)
+        provision.provision(s, xui, console)
+        console.ok("режим моста выключен: трафик снова выходит в интернет с этого сервера")
+        return 0
+    if args.action == "status":
+        if not s.is_bridge:
+            console.info("режим моста выключен (включить: stealthnode bridge set 'vless://…')")
+            return 0
+        probe = chain.probe_exit(s.get("SN_BRIDGE_EXIT_LINK"))
+        console.line(f"Выход: {probe['host']}:{probe['port']} (SNI {probe['sni']}); российские сайты: "
+                     + ("напрямую" if s.ru_direct else "через выход"))
+        if probe.get("error"):
+            console.fail(f"выход недоступен: {probe['error']}")
+            return 1
+        console.ok(f"выход доступен: TCP {probe['tcp_ms']} мс, {probe.get('tls')}, маскировка CN={probe.get('cert_cn')}")
+        return 0
+    return 2
+
+
 def cmd_version(args, console: Console) -> int:
     print(__version__)
     return 0
@@ -626,6 +784,7 @@ def build_parser() -> argparse.ArgumentParser:
     g = r.add_mutually_exclusive_group()
     g.add_argument("--env-only", action="store_true")
     g.add_argument("--db-only", action="store_true")
+    g.add_argument("--no-env", action="store_true", help="всё, кроме .env (так восстанавливает install.sh)")
     r.set_defaults(func=cmd_restore)
 
     pp = sub.add_parser(
@@ -642,6 +801,19 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--check", action="store_true", help="только проверить: подходит ли пароль из .env")
     pp.add_argument("--state", action="store_true", help=argparse.SUPPRESS)
     pp.set_defaults(func=cmd_panel_password)
+
+    ex = sub.add_parser("exit", help="зарубежный сервер как выход для российского моста (docs/RELAY.md)")
+    ex.add_argument("action", choices=["enable", "link", "status", "disable"])
+    ex.add_argument("bridge_ip", nargs="?", help="IP российского моста (для enable)")
+    ex.add_argument("--port", type=int, help="порт инбаунда выхода (по умолчанию случайный 40000-49999)")
+    ex.set_defaults(func=cmd_exit)
+
+    br = sub.add_parser("bridge", help="российский сервер как мост: трафик пользователей уходит на выход")
+    br.add_argument("action", choices=["set", "status", "off"])
+    br.add_argument("link", nargs="?", help="ссылка выхода vless://… (stealthnode exit link на выходе)")
+    br.add_argument("--no-ru-direct", action="store_true", help="российские сайты тоже через выход")
+    br.add_argument("--force", action="store_true", help="включить, даже если выход сейчас недоступен")
+    br.set_defaults(func=cmd_bridge)
 
     ub = sub.add_parser("unban", help="показать/снять баны fail2ban")
     ub.add_argument("ips", nargs="*", metavar="IP")
@@ -663,7 +835,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return int(args.func(args, console) or 0)
-    except (XuiError, PanelAuthError, ValueError, OSError, json.JSONDecodeError) as exc:
+    except (XuiError, PanelAuthError, chain.ChainError, ValueError, OSError, json.JSONDecodeError) as exc:
         console.fail(str(exc))
         return 1
     except KeyboardInterrupt:

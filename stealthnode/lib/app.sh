@@ -36,6 +36,10 @@ init_env() {
     [[ ${OPT_SSH_CLOSE_22:-0} == 1 ]] && args+=("SN_SSH_CLOSE_22=1")
     # IP владельца для исключений fail2ban тоже запоминается (раньше терялся при повторном запуске).
     [[ -n ${OPT_ADMIN_IP:-} ]] && args+=("SN_ADMIN_IP=${OPT_ADMIN_IP}")
+    # Связка «мост → выход» (docs/RELAY.md): роль сервера запоминается.
+    [[ -n ${OPT_EXIT_FOR:-} ]] && args+=("SN_EXIT_BRIDGE_IP=${OPT_EXIT_FOR}")
+    [[ -n ${OPT_EXIT_LINK:-} ]] && args+=("SN_BRIDGE_EXIT_LINK=${OPT_EXIT_LINK}")
+    [[ ${OPT_NO_RU_DIRECT:-0} == 1 ]] && args+=("SN_BRIDGE_RU_DIRECT=0")
     [[ -n ${OPT_PANEL_PORT:-} ]] && args+=("SN_PANEL_PORT=${OPT_PANEL_PORT}")
     [[ -n ${OPT_HY2_PORT:-} ]] && args+=("SN_HY2_PORT=${OPT_HY2_PORT}")
     [[ -n ${OPT_LIMIT_GB:-} ]] && args+=("SN_DEFAULT_LIMIT_GB=${OPT_LIMIT_GB}")
@@ -49,7 +53,9 @@ run_provision() {
     for u in "${OPT_USERS[@]}"; do args+=(--user "${u}"); done
     if [[ -n ${OPT_RESTORE:-} ]]; then
         info "восстановление базы панели и профилей из ${OPT_RESTORE}"
-        sn_cli restore "${OPT_RESTORE}"
+        # .env уже восстановлен в init_env и дополнен параметрами ЭТОГО сервера (IP, роль в связке):
+        # повторное восстановление вернуло бы IP старого сервера и стёрло --exit-link.
+        sn_cli restore --no-env "${OPT_RESTORE}"
         sn_cli token-rotate
         load_env
     fi
@@ -79,5 +85,12 @@ final_summary() {
     printf 'Пользователи:  stealthnode user add mama   (по умолчанию %s ГБ/мес, %s IP)\n' \
         "${SN_DEFAULT_LIMIT_GB}" "${SN_DEFAULT_IP_LIMIT}"
     printf 'Журнал:        %s\n' "${SN_LOG_FILE}"
+    if [[ -n ${SN_BRIDGE_EXIT_LINK:-} ]]; then
+        printf 'Роль:          мост (РФ) → выход %s\n' "$(sed -E 's#^vless://[^@]*@([^?]+).*#\1#' <<< "${SN_BRIDGE_EXIT_LINK}")"
+    fi
+    if [[ -n ${SN_EXIT_BRIDGE_IP:-} ]]; then
+        printf 'Роль:          выход для моста %s (порт %s/tcp)\n' "${SN_EXIT_BRIDGE_IP}" "${SN_EXIT_PORT:-?}"
+        printf 'Ссылка выхода: sudo stealthnode exit link   (для install.sh --exit-link на мосту)\n'
+    fi
     printf '%s=========================================================%s\n' "${C_BOLD}" "${C_OFF}"
 }

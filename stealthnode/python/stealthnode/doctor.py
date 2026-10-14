@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.client
 import json
 import os
@@ -22,7 +23,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, links, panelauth, users
+from . import chain, config, links, panelauth, users
 from .config import Settings
 from .util import Console, human_bytes, run, which
 from .xui import XuiClient, XuiError
@@ -266,7 +267,8 @@ def https_request(
 
 def check_panel(r: Report, s: Settings) -> None:
     r.console.header("Панель и подписка (HTTPS через Caddy)")
-    verify = s.get("SN_TLS_MODE") == "acme"
+    # На выходе домен указывает на мост: сертификат здесь больше не продлевается, и это нормально.
+    verify = s.get("SN_TLS_MODE") == "acme" and not s.is_exit
     domain, port = s.domain, s.int("SN_PANEL_PORT")
     try:
         status, _, cert = https_request("127.0.0.1", port, domain, f"/{s.get('SN_PANEL_PATH')}/", verify=verify)
@@ -395,15 +397,21 @@ def check_dns(r: Report, s: Settings) -> None:
     if which("dig"):
         code, out = _sh(["dig", "+short", "+time=3", "+tries=2", "@127.0.2.1", "example.com", "A"])
         ok = code == 0 and any(c.isdigit() for c in out)
-        r.add(OK if ok else FAIL, "dnscrypt-proxy (127.0.2.1) отвечает", out.strip().splitlines()[0] if out.strip() else "нет ответа")
+        # На мосту Xray спрашивает DNS сначала у системного резолвера (только для прямого трафика к
+        # российским сайтам), поэтому недоступность dnscrypt там не критична.
+        bad = WARN if s.is_bridge else FAIL
+        r.add(OK if ok else bad, "dnscrypt-proxy (127.0.2.1) отвечает", out.strip().splitlines()[0] if out.strip() else "нет ответа")
     try:
         addrs = sorted({ai[4][0] for ai in socket.getaddrinfo(s.domain, None, socket.AF_INET)})
     except socket.gaierror as exc:
         r.add(WARN, f"A-запись {s.domain}", f"не разрешается: {exc}")
         return
     ip = s.get("SN_PUBLIC_IP")
+    bridge = s.get("SN_EXIT_BRIDGE_IP")
     if ip and ip in addrs:
         r.add(OK, f"A-запись {s.domain} → {ip}")
+    elif s.is_exit and bridge in addrs:
+        r.add(OK, f"A-запись {s.domain} → {bridge}", "российский мост — клиенты подключаются через него")
     else:
         r.add(WARN, f"A-запись {s.domain}", f"указывает на {', '.join(addrs)}, а IP сервера {ip or '?'}")
 
@@ -440,10 +448,13 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def e2e_link(
-    link: links.ShareLink, xray: Path, *, url: str, url2: str | None = None, speed_url: str | None = None
-) -> tuple[bool, str]:
-    """Поднять клиент Xray с этой ссылкой (адрес → 127.0.0.1) и сходить в интернет через SOCKS."""
+class ClientStartError(RuntimeError):
+    pass
+
+
+@contextlib.contextmanager
+def xray_socks(link: links.ShareLink, xray: Path):
+    """Клиент Xray с этой ссылкой (адрес → 127.0.0.1); отдаёт порт локального SOCKS."""
     port = _free_port()
     cfg = links.xray_client_config(link.with_address("127.0.0.1"), port)
     with tempfile.TemporaryDirectory(prefix="sn-e2e-") as tmp:
@@ -456,7 +467,30 @@ def e2e_link(
             if not _wait_port(port):
                 proc.terminate()
                 out = proc.communicate(timeout=5)[0]
-                return False, "клиент Xray не запустился: " + out.strip()[-300:]
+                raise ClientStartError("клиент Xray не запустился: " + out.strip()[-300:])
+            yield port
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+
+def fetch_via(port: int, url: str, timeout: int = 20) -> str | None:
+    """Тело ответа (коротко) через SOCKS-порт клиента; None — запрос не прошёл."""
+    code, out = _sh(["curl", "-sS", "--max-time", str(timeout), "--socks5-hostname", f"127.0.0.1:{port}", url],
+                    timeout=timeout + 10)
+    return out.strip().strip('"')[:100] if code == 0 else None
+
+
+def e2e_link(
+    link: links.ShareLink, xray: Path, *, url: str, url2: str | None = None, speed_url: str | None = None
+) -> tuple[bool, str]:
+    """Поднять клиент Xray с этой ссылкой (адрес → 127.0.0.1) и сходить в интернет через SOCKS."""
+    try:
+        with xray_socks(link, xray) as port:
             timings = []
             # Два запроса к разным доменам: первый «холодный» (новое соединение, DNS), второй — к другому
             # домену, чтобы видеть реальную задержку на новый сайт, а не кэш.
@@ -480,13 +514,8 @@ def e2e_link(
                     mbit = float(sp.strip() or 0) * 8 / 1e6
                     detail += f", скорость ~{mbit:.0f} Мбит/с (с самого сервера)"
             return True, detail
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+    except ClientStartError as exc:
+        return False, str(exc)
 
 
 def check_e2e(r: Report, s: Settings, xui: XuiClient, speed: bool) -> None:
@@ -512,6 +541,80 @@ def check_e2e(r: Report, s: Settings, xui: XuiClient, speed: bool) -> None:
             continue
         ok, detail = e2e_link(link, xray, url=url, url2=url2, speed_url=speed_url)
         r.add(OK if ok else FAIL, f"туннель {link.kind} работает", detail)
+    if s.is_bridge:
+        check_bridge_egress(r, s, raw_links, xray)
+
+
+IPCHECK_URL = os.environ.get("SN_IPCHECK_URL", "https://api.ipify.org")
+RU_IPCHECK_URL = os.environ.get("SN_RU_IPCHECK_URL", "https://ipv4-internet.yandex.net/api/v0/ip")
+
+
+def check_bridge_egress(r: Report, s: Settings, raw_links: list[str], xray: Path) -> None:
+    """Мост: с какого IP трафик пользователя на самом деле выходит в интернет."""
+    parsed = [links.parse(x) for x in raw_links]
+    link = next((x for x in parsed if x.kind == "xhttp"), parsed[0] if parsed else None)
+    if link is None:
+        return
+    exit_host = links.parse(s.get("SN_BRIDGE_EXIT_LINK")).host
+    own = s.get("SN_PUBLIC_IP")
+    try:
+        with xray_socks(link, xray) as port:
+            world = fetch_via(port, IPCHECK_URL)
+            ru = fetch_via(port, RU_IPCHECK_URL) if s.ru_direct else None
+    except ClientStartError as exc:
+        r.add(FAIL, "мост: проверка выхода в интернет", str(exc))
+        return
+    title = "мост: трафик выходит в интернет через выход"
+    if not world:
+        r.add(FAIL, title, f"{IPCHECK_URL} через туннель не ответил")
+    elif not chain.is_public_ip(exit_host):
+        r.add(OK, title, f"внешний IP {world} (адрес выхода {exit_host} — не публичный, тестовый режим)")
+    elif world == exit_host:
+        r.add(OK, title, f"внешний IP {world} — зарубежный выход")
+    elif world == own:
+        r.add(FAIL, title, f"внешний IP {world} — это сам мост: трафик идёт мимо выхода")
+    else:
+        r.add(WARN, title, f"внешний IP {world}, адрес выхода {exit_host} (у выхода другой исходящий IP?)")
+    if s.ru_direct:
+        if ru and ru == own:
+            r.add(OK, "мост: российские сайты — напрямую", f"их видят с IP моста {ru}")
+        else:
+            r.add(WARN, "мост: российские сайты — напрямую", f"проверка {RU_IPCHECK_URL}: {ru or 'нет ответа'}")
+
+
+def check_chain(r: Report, s: Settings, xui: XuiClient | None) -> None:
+    """Связка «мост в РФ → выход за рубежом» (docs/RELAY.md)."""
+    if not (s.is_exit or s.is_bridge):
+        return
+    r.console.header("Связка: мост в РФ → выход за рубежом")
+    if s.is_exit:
+        bridge, port = s.get("SN_EXIT_BRIDGE_IP"), s.int("SN_EXIT_PORT")
+        if xui:
+            inb = chain.find_inbound(xui, chain.TAG_BRIDGE_IN)
+            ok = inb is not None and int(inb.get("port", 0)) == port
+            r.add(OK if ok else FAIL, f"выход: инбаунд для моста {bridge}", f"порт {port}/tcp" if ok else "нет — stealthnode provision")
+            r.add(OK if chain.bridge_client_uuid(xui) else FAIL, "выход: учётная запись моста")
+        rule = chain.ufw_has_bridge_rule(bridge, port)
+        if rule is not None:
+            r.add(OK if rule else WARN, f"выход: UFW пускает на {port}/tcp только мост",
+                  "" if rule else f"правила нет — stealthnode exit enable {bridge}")
+    if s.is_bridge:
+        probe = chain.probe_exit(s.get("SN_BRIDGE_EXIT_LINK"))
+        target = f"{probe['host']}:{probe['port']}"
+        if probe.get("error"):
+            r.add(FAIL, f"мост: выход {target} доступен", probe["error"])
+        else:
+            r.add(OK, f"мост: выход {target} доступен",
+                  f"TCP {probe['tcp_ms']} мс, {probe.get('tls')}, маскировка CN={probe.get('cert_cn')}")
+        if xui:
+            outs = xui.get_xray_template().get("outbounds") or []
+            first = outs[0].get("tag", "") if outs else ""
+            r.add(OK if first == chain.TAG_EXIT else FAIL, "мост: трафик по умолчанию идёт на выход",
+                  f"первый исходящий: {first or '-'}")
+            po = xui.get_settings().get("panelOutbound")
+            r.add(OK if po == chain.TAG_EXIT else WARN, "мост: Telegram-бот и запросы панели — через выход",
+                  f"panelOutbound={po or '-'}")
+        r.add(OK, "мост: российские сайты", "напрямую с моста" if s.ru_direct else "через выход")
 
 
 # --- точка входа ----------------------------------------------------------------------
@@ -536,6 +639,7 @@ def run_doctor(s: Settings, console: Console, *, e2e: bool = False, speed: bool 
         xui = None
     check_reality_camouflage(r, s)
     check_reality_target(r, s, xui)
+    check_chain(r, s, xui)
     if xui:
         console.header("Подписка")
         check_subscription(r, s, xui)

@@ -254,7 +254,7 @@ def dns_block(strategy: str = "UseIPv4") -> dict:
 
 
 def patch_xray_template(template: dict, s: Settings) -> tuple[dict, bool]:
-    """Внести DNS и стратегию freedom в шаблон Xray. Возвращает (шаблон, изменён ли)."""
+    """Внести DNS, стратегию freedom и роль в связке в шаблон Xray. Возвращает (шаблон, изменён ли)."""
     tpl = copy.deepcopy(template)
     before = repr(tpl)
     strategy = s.get("SN_FREEDOM_STRATEGY") or "UseIPv4"
@@ -273,6 +273,10 @@ def patch_xray_template(template: dict, s: Settings) -> tuple[dict, bool]:
     log = tpl.setdefault("log", {})
     log.setdefault("access", "none")
     log["loglevel"] = log.get("loglevel") or "warning"
+    # Связка «мост → выход»: исходящий по умолчанию, прямой путь для российских сайтов, DNS.
+    from . import chain  # локально: chain сам использует функции этого модуля
+
+    chain.patch_template_chain(tpl, s)
     return tpl, repr(tpl) != before
 
 

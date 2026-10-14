@@ -9,6 +9,8 @@ setup_fail2ban() {
     [[ -n ${SN_F2B_SSH_PORTS} ]] || SN_F2B_SSH_PORTS=${SN_SSH_PORT:-22}
     # SN_ADMIN_IP (из --admin-ip, хранится в .env): IP/подсети через пробел или запятую.
     [[ -n ${SN_ADMIN_IP:-} ]] && SN_F2B_IGNOREIP+=" ${SN_ADMIN_IP//,/ }"
+    # Российский мост (если этот сервер — выход) не банится никогда: за его IP — все пользователи.
+    [[ -n ${SN_EXIT_BRIDGE_IP:-} ]] && SN_F2B_IGNOREIP+=" ${SN_EXIT_BRIDGE_IP}"
     install -d -m 755 /var/log/x-ui
     touch /var/log/x-ui/3xui.log
     render_template "${SN_SRC}/templates/fail2ban/stealthnode.local.tmpl" /etc/fail2ban/jail.d/stealthnode.local 644 \

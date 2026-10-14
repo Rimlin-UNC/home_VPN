@@ -55,7 +55,8 @@ check_ports() {
 detect_public_ip() {
     local url ip=""
     for url in https://api.ipify.org https://ipv4.icanhazip.com https://ifconfig.me/ip https://checkip.amazonaws.com; do
-        ip=$(curl -4 -fsS --max-time 6 "${url}" 2> /dev/null | tr -d '[:space:]') || true
+        # Напрямую, даже если задан --proxy: нужен IP ЭТОГО сервера, а не прокси.
+        ip=$(curl -4 -fsS --noproxy '*' --max-time 6 "${url}" 2> /dev/null | tr -d '[:space:]') || true
         if is_ipv4 "${ip}"; then
             break
         fi
@@ -73,7 +74,7 @@ detect_public_ip() {
 detect_ipv6() {
     SN_FREEDOM_STRATEGY="UseIPv4"
     if ip -6 route show default 2> /dev/null | grep -q default &&
-        curl -6 -fsS --max-time 6 https://api64.ipify.org > /dev/null 2>&1; then
+        curl -6 -fsS --noproxy '*' --max-time 6 https://api64.ipify.org > /dev/null 2>&1; then
         SN_FREEDOM_STRATEGY="UseIPv4v6"
         ok "IPv6 работает — Xray будет ходить в интернет по IPv4 и IPv6"
     else

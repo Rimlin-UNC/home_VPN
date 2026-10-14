@@ -168,6 +168,30 @@ jobs:
             sudo grep -F 'Пароль:  Восстановлен-2026' /root/stealthnode-credentials.txt
             sudo stealthnode doctor --e2e
           } 2>&1 | tee /tmp/ci/5b-lockout.log
+      - name: Связка мост → выход (одна 3x-ui в обеих ролях, петля через 127.0.0.1)
+        run: |
+          {
+            set -x
+            sudo stealthnode exit enable 127.0.0.1
+            sudo stealthnode exit status
+            # Мост подключается к выходу по адресу из ссылки; здесь выход — этот же сервер.
+            LINK=$(sudo stealthnode exit link | sed -E 's#@[^:/]+:#@127.0.0.1:#')
+            sudo stealthnode bridge set "$LINK"
+            sudo stealthnode bridge status
+            # Шаблон с исходящим на выход, geoip:ru и правилом против петли принят настоящими 3x-ui и Xray
+            sudo stealthnode doctor --e2e
+            # Трафик пользователей прошёл через инбаунд выхода: у учётной записи моста растёт счётчик
+            for _ in $(seq 1 12); do
+              sudo stealthnode exit status | tee /tmp/ci/exit-status.txt
+              grep -q 'Трафик моста: ↑ 0 Б, ↓ 0 Б' /tmp/ci/exit-status.txt || break
+              sleep 5
+            done
+            ! grep -q 'Трафик моста: ↑ 0 Б, ↓ 0 Б' /tmp/ci/exit-status.txt || exit 1
+            sudo stealthnode bridge off
+            sudo stealthnode exit disable
+            ! sudo ufw status | grep -F 'StealthNode exit for bridge' || exit 1
+            sudo stealthnode doctor --e2e
+          } 2>&1 | tee /tmp/ci/5c-chain.log
       - name: Резервная копия и восстановление
         run: |
           {
@@ -215,7 +239,7 @@ jobs:
             [ -s "$f" ] && bash tests/ci/annotate.sh notice "$(basename "$f")" "$f" 60 120
           done
           [ -s /tmp/ci/5-reinstall.log ] && bash tests/ci/annotate.sh notice 5-reinstall.log /tmp/ci/5-reinstall.log 60 60
-          for f in /tmp/ci/5a-panel-ui.log /tmp/ci/5b-lockout.log; do
+          for f in /tmp/ci/5a-panel-ui.log /tmp/ci/5b-lockout.log /tmp/ci/5c-chain.log; do
             [ -s "$f" ] && bash tests/ci/annotate.sh notice "$(basename "$f")" "$f" 60 120
           done
           [ -s /tmp/ci/7-ssh.log ] && bash tests/ci/annotate.sh warning 7-ssh.log /tmp/ci/7-ssh.log 60 180
