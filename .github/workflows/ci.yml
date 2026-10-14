@@ -73,6 +73,13 @@ jobs:
         run: sudo stealthnode doctor --e2e --speed 2>&1 | tee /tmp/ci/2-doctor.log
       - name: Контракт API 3x-ui и ссылки
         run: sudo python3 tests/ci/contract_check.py 2>&1 | tee /tmp/ci/3-contract.log
+      - name: Время ответа DNS (dnscrypt-proxy)
+        run: |
+          for q in www.gstatic.com www.wikipedia.org; do
+            for proto in "" "+tcp"; do
+              printf '%s %s: ' "$q" "${proto:-udp}"; dig $proto @127.0.2.1 "$q" A | grep -E 'Query time' || echo 'нет ответа'
+            done
+          done 2>&1 | tee /tmp/ci/3b-dns.log
       - name: Управление пользователями
         run: |
           {
@@ -98,8 +105,18 @@ jobs:
             sudo stealthnode restore "$f"
             sudo stealthnode doctor --e2e
           } 2>&1 | tee /tmp/ci/6-backup.log
-      - name: Диагностика
+      - name: Отчёт (аннотации)
         if: always()
+        run: |
+          set +e
+          for f in /tmp/ci/2-doctor.log /tmp/ci/3-contract.log /tmp/ci/3b-dns.log; do
+            [ -s "$f" ] && bash tests/ci/annotate.sh notice "$(basename "$f")" "$f" 60 120
+          done
+          [ -s /tmp/ci/5-reinstall.log ] && bash tests/ci/annotate.sh notice 5-reinstall.log /tmp/ci/5-reinstall.log 60 60
+          [ -s /tmp/ci/1-install.log ] && grep -E '^\[|^==>' /tmp/ci/1-install.log > /tmp/ci/1-install-summary.log && \
+            bash tests/ci/annotate.sh notice 1-install-summary.log /tmp/ci/1-install-summary.log 60 120
+      - name: Диагностика при ошибке
+        if: failure()
         run: |
           set +e
           {
@@ -114,6 +131,6 @@ jobs:
             sudo ufw status verbose
             sudo fail2ban-client status
           } > /tmp/ci/9-system.log 2>&1
-          last=$(ls -1 /tmp/ci/*.log | grep -v 9-system | tail -n1)
-          bash tests/ci/annotate.sh notice "$(basename "$last")" "$last" 50 500
+          last=$(ls -1 /tmp/ci/*.log | grep -v -e 9-system -e summary | tail -n1)
+          bash tests/ci/annotate.sh error "$(basename "$last")" "$last" 50 400
           bash tests/ci/annotate.sh warning system /tmp/ci/9-system.log 60 600

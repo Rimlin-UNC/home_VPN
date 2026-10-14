@@ -77,11 +77,15 @@ def test_template_patch_idempotent(settings):
     new, changed = payloads.patch_xray_template(tpl, settings)
     assert changed
     assert new["dns"]["servers"][0] == "tcp+local://127.0.2.1:53"
+    assert new["dns"]["queryStrategy"] == "UseIPv4"  # сервер без IPv6 — без AAAA-запросов
     assert new["outbounds"][0]["settings"]["domainStrategy"] == "UseIPv4"
     assert new["outbounds"][0]["settings"]["finalRules"] == [1]
     assert new["log"]["access"] == "none"
     _, changed_again = payloads.patch_xray_template(new, settings)
     assert not changed_again
+    settings.values["SN_FREEDOM_STRATEGY"] = "UseIPv4v6"
+    dual, _ = payloads.patch_xray_template(new, settings)
+    assert dual["dns"]["queryStrategy"] == "UseIP" and dual["outbounds"][0]["settings"]["domainStrategy"] == "UseIPv4v6"
 
 
 def test_inbound_diff_ignores_clients(settings):

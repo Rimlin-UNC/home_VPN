@@ -235,8 +235,12 @@ def apply_settings_patch(current: dict, patch: dict) -> tuple[dict, list[str]]:
     return new, changed
 
 
-def dns_block() -> dict:
-    """DNS для Xray: dnscrypt-proxy по TCP напрямую (+local), резерв — DoH, затем системный."""
+def dns_block(strategy: str = "UseIPv4") -> dict:
+    """DNS для Xray: dnscrypt-proxy по TCP напрямую (+local), резерв — DoH, затем системный.
+
+    На серверах без IPv6 запрашиваются только A-записи (без лишних AAAA-запросов).
+    """
+    query = "UseIPv4" if strategy == "UseIPv4" else "UseIP"
     return {
         "tag": "dns-internal",
         "servers": [
@@ -244,7 +248,7 @@ def dns_block() -> dict:
             "https+local://1.1.1.1/dns-query",
             "localhost",
         ],
-        "queryStrategy": "UseIP",
+        "queryStrategy": query,
         "disableCache": False,
     }
 
@@ -253,8 +257,8 @@ def patch_xray_template(template: dict, s: Settings) -> tuple[dict, bool]:
     """Внести DNS и стратегию freedom в шаблон Xray. Возвращает (шаблон, изменён ли)."""
     tpl = copy.deepcopy(template)
     before = repr(tpl)
-    tpl["dns"] = dns_block()
     strategy = s.get("SN_FREEDOM_STRATEGY") or "UseIPv4"
+    tpl["dns"] = dns_block(strategy)
     outbounds = tpl.setdefault("outbounds", [])
     direct = next((o for o in outbounds if o.get("protocol") == "freedom"), None)
     if direct is None:

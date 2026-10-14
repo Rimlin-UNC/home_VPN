@@ -420,14 +420,17 @@ def e2e_link(link: links.ShareLink, xray: Path, *, url: str, speed_url: str | No
                 proc.terminate()
                 out = proc.communicate(timeout=5)[0]
                 return False, "клиент Xray не запустился: " + out.strip()[-300:]
-            code, out = _sh(
-                ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code} %{time_total}", "--max-time", "20",
-                 "--socks5-hostname", f"127.0.0.1:{port}", url],
-                timeout=30,
-            )
-            if code != 0 or not out.strip().startswith(("200", "204")):
-                return False, f"запрос через туннель не прошёл: {out.strip()[:200]}"
-            detail = f"HTTP {out.split()[0]} за {float(out.split()[1]):.2f} с"
+            timings = []
+            for _attempt in range(2):  # первый запрос — «холодный» (DNS, рукопожатия), второй — тёплый
+                code, out = _sh(
+                    ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code} %{time_total}", "--max-time", "20",
+                     "--socks5-hostname", f"127.0.0.1:{port}", url],
+                    timeout=30,
+                )
+                if code != 0 or not out.strip().startswith(("200", "204")):
+                    return False, f"запрос через туннель не прошёл: {out.strip()[:200]}"
+                timings.append(float(out.split()[1]))
+            detail = f"HTTP {out.split()[0]} за {timings[0]:.2f} с (повторно {timings[1]:.2f} с)"
             if speed_url:
                 code, sp = _sh(
                     ["curl", "-sS", "-o", "/dev/null", "-w", "%{speed_download}", "--max-time", "30",
