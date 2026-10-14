@@ -1,0 +1,39 @@
+# StealthNode: правила fail2ban (генерируется установщиком).
+# Ubuntu 24.04 пишет журнал sshd только в journald → backend = systemd.
+# Баны через iptables (iptables-nft) — работают вместе с UFW, отдельная служба nftables не нужна.
+
+[DEFAULT]
+banaction = iptables-multiport
+banaction_allports = iptables-allports
+ignoreip = ${SN_F2B_IGNOREIP}
+
+# SSH: 3 неудачные попытки за 10 минут → бан на 24 часа (требование ТЗ).
+[sshd]
+enabled = true
+backend = systemd
+port = ${SN_F2B_SSH_PORTS}
+maxretry = 3
+findtime = 10m
+bantime = 24h
+
+# Перебор пароля панели 3x-ui (журнал /var/log/x-ui/3xui.log, реальный IP через Caddy).
+# Встроенный лимит 3x-ui: 5 ошибок за 5 минут → 15 минут; fail2ban банит на сутки.
+[stealthnode-panel]
+enabled = true
+backend = auto
+filter = stealthnode-panel
+logpath = /var/log/x-ui/3xui.log
+port = ${SN_F2B_PANEL_PORT}
+maxretry = 5
+findtime = 10m
+bantime = 24h
+
+# Повторные нарушители: 3 бана за сутки → неделя на всех портах.
+[recidive]
+enabled = true
+backend = auto
+logpath = /var/log/fail2ban.log
+banaction = %(banaction_allports)s
+findtime = 1d
+bantime = 7d
+maxretry = 3

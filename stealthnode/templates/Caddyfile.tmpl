@@ -1,0 +1,50 @@
+# StealthNode: Caddy публикует ТОЛЬКО панель 3x-ui и подписку — на отдельном порту.
+# Порт 443/tcp занят Xray (VLESS + XHTTP + REALITY), поэтому:
+#  * TLS-ALPN-01 невозможен → сертификат Let's Encrypt выпускается через HTTP-01 на :80;
+#  * редирект с :80 отключён, чтобы не раскрывать порт панели сканерам;
+#  * без HTTP/3 (UDP 443 занят Hysteria2).
+# Файл генерируется установщиком из stealthnode/templates/Caddyfile.tmpl.
+{
+	${SN_CADDY_GLOBAL_EMAIL}
+	auto_https disable_redirects
+	servers {
+		protocols h1 h2
+	}
+	log {
+		output file /var/log/caddy/caddy.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		level WARN
+	}
+}
+
+${SN_DOMAIN}:${SN_PANEL_PORT} {
+	${SN_CADDY_TLS}
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Панель 3x-ui (слушает только 127.0.0.1).
+	@panel path /${SN_PANEL_PATH} /${SN_PANEL_PATH}/*
+	handle @panel {
+		reverse_proxy 127.0.0.1:${SN_XUI_PORT}
+	}
+
+	# Подписки пользователей (сервер подписок 3x-ui, только 127.0.0.1).
+	@sub path /${SN_SUB_PATH}/*
+	handle @sub {
+		reverse_proxy 127.0.0.1:${SN_SUB_PORT}
+	}
+
+	# Всё остальное — 404: случайный сканер не узнает, что здесь панель.
+	handle {
+		respond 404
+	}
+}

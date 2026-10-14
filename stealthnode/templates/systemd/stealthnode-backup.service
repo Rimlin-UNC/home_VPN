@@ -1,0 +1,9 @@
+[Unit]
+Description=StealthNode: резервная копия панели и параметров
+After=x-ui.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/stealthnode backup --keep 14
+Nice=10
+IOSchedulingClass=idle

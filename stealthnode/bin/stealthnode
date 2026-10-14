@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# StealthNode CLI: обёртка над Python-пакетом (только стандартная библиотека).
+set -euo pipefail
+export PYTHONPATH="${SN_APP_DIR:-/opt/stealthnode/app}/python${PYTHONPATH:+:${PYTHONPATH}}"
+exec /usr/bin/env python3 -m stealthnode "$@"

@@ -1,0 +1,106 @@
+#!/usr/bin/env bats
+# Тесты функций установщика, которые не требуют root и сети.
+
+setup() {
+    REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
+    export NO_COLOR=1
+    # shellcheck source=../../stealthnode/lib/common.sh
+    source "${REPO}/stealthnode/lib/common.sh"
+    TMP="$(mktemp -d)"
+}
+
+teardown() {
+    rm -rf "${TMP}"
+}
+
+@test "is_port принимает 1..65535 и отвергает мусор" {
+    is_port 1
+    is_port 443
+    is_port 65535
+    ! is_port 0
+    ! is_port 65536
+    ! is_port abc
+    ! is_port ""
+}
+
+@test "is_ipv4" {
+    is_ipv4 203.0.113.7
+    ! is_ipv4 256.1.1.1
+    ! is_ipv4 1.2.3
+    ! is_ipv4 "1.2.3.4 "
+}
+
+@test "render_template подставляет только перечисленные переменные" {
+    printf 'a=${SN_A} keep=${distro_id} b=${SN_B}\n' > "${TMP}/t.tmpl"
+    SN_A=1 SN_B="два" render_template "${TMP}/t.tmpl" "${TMP}/out" 600 SN_A SN_B
+    run cat "${TMP}/out"
+    [ "${output}" = 'a=1 keep=${distro_id} b=два' ]
+    run stat -c %a "${TMP}/out"
+    [ "${output}" = "600" ]
+}
+
+@test "render_template: многострочные значения и спецсимволы буквально" {
+    printf 'x {\n\t${SN_BLOCK}\n}\n' > "${TMP}/t.tmpl"
+    SN_BLOCK=$'tls {\n\t\tissuer & \\1 $HOME\n\t}' render_template "${TMP}/t.tmpl" "${TMP}/out" 644 SN_BLOCK
+    run cat "${TMP}/out"
+    [ "${output}" = $'x {\n\ttls {\n\t\tissuer & \\1 $HOME\n\t}\n}' ]
+}
+
+@test "render_template падает на незаданной переменной" {
+    printf '${SN_NOPE}\n' > "${TMP}/t.tmpl"
+    unset SN_NOPE
+    run render_template "${TMP}/t.tmpl" "${TMP}/out" 600 SN_NOPE
+    [ "${status}" -ne 0 ]
+}
+
+@test "write_if_changed сообщает об изменении" {
+    run bash -c "source '${REPO}/stealthnode/lib/common.sh'; echo x | write_if_changed '${TMP}/f' 640"
+    [ "${status}" -eq 0 ]
+    run bash -c "source '${REPO}/stealthnode/lib/common.sh'; echo x | write_if_changed '${TMP}/f' 640"
+    [ "${status}" -eq 1 ]
+    run stat -c %a "${TMP}/f"
+    [ "${output}" = "640" ]
+}
+
+@test "retry повторяет и сдаётся" {
+    run retry 3 0 false
+    [ "${status}" -eq 1 ]
+    calls=0
+    flaky() {
+        calls=$((calls + 1))
+        ((calls >= 2))
+    }
+    retry 3 0 flaky
+    [ "${calls}" -eq 2 ]
+}
+
+@test "install.sh --help работает без root" {
+    run bash "${REPO}/stealthnode/install.sh" --help
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--domain"* ]]
+    [[ "${output}" == *"--ssh-keys-only"* ]]
+}
+
+@test "install.sh отвергает неизвестный параметр и плохой домен" {
+    run bash "${REPO}/stealthnode/install.sh" --bogus
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"неизвестный параметр"* ]]
+    run bash "${REPO}/stealthnode/install.sh" --domain "bad domain"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"некорректный домен"* ]]
+    run bash "${REPO}/stealthnode/install.sh" --tls wrong
+    [ "${status}" -ne 0 ]
+}
+
+@test "шаблон unattended-upgrades сохраняет переменные apt" {
+    SN_REBOOT=true SN_REBOOT_TIME=01:30 render_template \
+        "${REPO}/stealthnode/templates/apt-52stealthnode-unattended.tmpl" "${TMP}/u" 644 SN_REBOOT SN_REBOOT_TIME
+    grep -q '${distro_id}:${distro_codename}-security' "${TMP}/u"
+    grep -q 'Automatic-Reboot "true"' "${TMP}/u"
+}
+
+@test "CLI-обёртка запускает пакет из репозитория" {
+    run env SN_APP_DIR="${REPO}/stealthnode" bash "${REPO}/stealthnode/bin/stealthnode" version
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "$(cat "${REPO}/VERSION")" ]
+}
